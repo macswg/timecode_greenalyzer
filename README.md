@@ -1,64 +1,56 @@
 # SMPTE Timecode Analyzer
 
-A browser-based Linear Timecode (LTC) analyzer built to the SMPTE ST 12-1:2014 and ST 12-2:2014 specifications. It decodes and displays timecode, detects frame rate and drop-frame mode, measures signal level, and flags error conditions including clipping, low level, noise, distortion, and dropout.
+A browser-based Linear Timecode (LTC) analyzer built to the SMPTE ST 12-1:2014 and ST 12-2:2014 specifications. It decodes and displays timecode from a live audio input, detects frame rate and drop-frame mode automatically, measures signal level, and flags error conditions including clipping, low level, noise, and dropout.
 
 ---
 
-## Installation
+## Project Structure
 
-The analyzer is a single self-contained React component with no backend. You can run it two ways: locally in any React project, or inside Claude as an artifact.
+```
+timecode_greenalyzer/
+├── smpte-analyzer/     Vite + React app — the analyzer UI
+│   ├── src/
+│   │   ├── App.jsx         Root component, UI, audio glue
+│   │   ├── ltcDecoder.js   Biphase decoder, MultiRateDecoder
+│   │   ├── publisher.js    Reconnecting WebSocket publisher
+│   │   └── tickWorker.js   Web Worker tick source
+│   └── public/
+│       └── ltc-worklet.js  AudioWorklet sample capture
+└── smpte-bridge/       Node WS sidecar — fan-out to subscribers
+    └── src/index.js
+```
 
-### Option 1 — Run Locally with Vite
+---
+
+## Running the Analyzer
 
 **Prerequisites:** Node.js 18 or later
 
 ```bash
-# 1. Create a new Vite + React project
-npm create vite@latest smpte-analyzer -- --template react
 cd smpte-analyzer
-
-# 2. Install dependencies
 npm install
-
-# 3. Replace the default component with the analyzer
-cp /path/to/smpte-analyzer.jsx src/App.jsx
-
-# 4. Update src/main.jsx to import App (it already does by default)
-# No changes needed if using the Vite React template
-
-# 5. Start the dev server
 npm run dev
 ```
 
-Then open `http://localhost:5173` in your browser.
+Open `http://localhost:5173` in your browser. The app immediately attempts to open your default audio input. Grant microphone permission when prompted.
 
+To use a real LTC source: connect a timecode output to an audio interface, then select that interface in the device picker inside the app.
 
-### Option 2 — Run as a Claude Artifact
+---
 
-1. Open Claude and start a new conversation
-2. Upload `smpte-analyzer.jsx` or paste its contents
-3. Ask Claude to render it as an artifact
-4. It will run immediately in the artifact preview panel — no build step required
+## Running the Bridge Sidecar (optional)
 
+The bridge is only needed if you want to forward the timecode feed to other applications on the network.
 
-
-### Option 3 — Drop into an Existing React Project
-
-Copy `smpte-analyzer.jsx` into your project's component directory and import it:
-
-```jsx
-import SMPTEAnalyzer from './components/smpte-analyzer';
-
-export default function App() {
-  return <SMPTEAnalyzer />;
-}
+```bash
+cd smpte-bridge
+npm install
+npm start
 ```
 
-The component has no required props and manages all state internally.
+Listens on `:8765` by default. Set the `PORT` environment variable to override. See `smpte-bridge/README.md` for endpoints and message types.
 
-### Dependencies
-
-The analyzer uses only React built-ins and the browser's native Web Audio API. No additional npm packages are required. The Google Fonts stylesheet for `Share Tech Mono` and `Orbitron` is loaded at runtime via a CSS `@import` — an internet connection is needed for the first load, after which the fonts are cached by the browser.
+To connect the analyzer to the bridge, enter the WebSocket URL (`ws://localhost:8765/ingest`) in the API PUBLISHER section of the UI and click PUBLISH.
 
 ---
 
@@ -110,7 +102,7 @@ The analyzer detects all frame rates defined in SMPTE ST 12-1 and ST 12-2:
 | 59.94 | 59.94 ND | 60000/1001 | No |
 | 60 | 60 ND | 60 | No |
 
-A confidence bar shows the likelihood of the detected rate. In live audio mode, rate detection is derived from the biphase bit clock frequency. In simulation mode, the rate is set manually.
+In live audio mode, rate detection is fully automatic: five `LtcDecoder` instances run in parallel at 24/25/30/50/60 fps candidates and the winner is chosen by frames-decoded score. NDF vs DF is resolved from the drop-frame flag in the parsed frame. A confidence bar shows the current lock strength.
 
 ---
 
@@ -177,7 +169,7 @@ In biphase mark coding:
 - A **`1` bit** has an additional transition at the mid-point of the bit cell
 - A **`0` bit** has no mid-point transition
 
-The decoder measures the time between transitions. A short interval (≈ half bit-cell) indicates a `1`; a long interval (≈ full bit-cell) indicates a `0`. Intervals that fall outside the valid range (±30% tolerance) are flagged as bit errors.
+The decoder measures the time between transitions. A short interval (≈ half bit-cell) indicates a `1`; a long interval (≈ full bit-cell) indicates a `0`. Intervals that fall outside the valid range (±25% tolerance) are flagged as bit errors.
 
 ---
 
@@ -200,8 +192,8 @@ The analyzer measures and displays:
 - **RMS level** — average signal energy, the primary level indicator for LTC
 - **Peak level** — instantaneous peak with hold and decay
 - **Noise floor** — estimated floor below the signal
-- **SNR** (Signal-to-Noise Ratio) — ratio of signal to noise floor, in dB
-- **THD** (Total Harmonic Distortion) — percentage distortion; elevated THD indicates the signal is being processed or clipped upstream
+- **SNR** (Signal-to-Noise Ratio) — ratio of LTC-band spectral power to out-of-band power, in dB; shown only when locked to a live signal
+- **THD** (Total Harmonic Distortion) — percentage distortion; shown only in simulation mode (null in live mode)
 
 ---
 
@@ -233,67 +225,45 @@ The total number of frames analyzed and the cumulative error count are shown in 
 
 ---
 
+### Session Log
+
+The app maintains an in-session error log that captures each distinct error-state transition with timestamp, timecode, rate, source (live or sim), and level. The log can be exported as CSV or JSON. Clearing the log also resets the error counter.
+
+---
+
 ## Audio Input Modes
 
-### Simulation Mode (default)
+### Live Audio Mode (default)
 
-The analyzer runs a built-in LTC generator that produces valid timecode at the selected rate and applies simulated level, noise, and dropout conditions controlled by three sliders:
+On startup the app calls `getUserMedia` immediately and attempts to open the default audio input. If the browser blocks this before a user gesture (common in some browsers) or the user denies access, the app surfaces the error and falls back to simulation mode until the user clicks **CONNECT AUDIO INPUT**.
 
-- **Signal Level** — sets RMS level from −70 to 0 dBFS
-- **Noise / Distortion** — 0–100%; above ~15% triggers the NOISE flag
-- **Dropout Probability** — 0–50%; probability per frame of a simulated dropout event
+When live audio is active:
+- A device picker (`enumerateDevices`) lets you select among all available audio inputs. Switching reopens the stream with the selected `deviceId`. The app listens for `devicechange` events and updates the list automatically.
+- An `AudioWorklet` (`ltc-worklet.js`) runs on the audio thread and forwards every sample to the main thread without dropping any between reads. The `MultiRateDecoder` (`ltcDecoder.js`) receives these samples and runs five `LtcDecoder` instances in parallel at 24/25/30/50/60 fps. The winner is selected by score (frames decoded minus a weighted bit-error penalty, with a recency bonus for frames decoded within the last 500 ms).
+- The timecode digits (HH:MM:SS:FF) shown in the display come directly from the decoded LTC frame. If no valid frame has been decoded within ~200 ms, the display shows `00:00:00:00` and LOCK turns off.
+- SNR is computed from the FFT (`computeLtcSnr`) — it compares spectral power inside the LTC bit-rate band to power outside it. It is only populated when locked; otherwise it shows `—`.
+- THD is not computed in live mode and shows `—`.
 
-This mode is useful for understanding how the analyzer responds to each error condition.
+To use with real LTC: connect a timecode source to an audio interface input and select that interface in the device picker.
 
-### Live Audio Mode
+### Simulation Mode
 
-Clicking **Connect Mic Input** requests microphone access via the browser's Web Audio API. The analyzer captures the audio stream, runs it through a 2048-point `AnalyserNode`, and extracts Float32 time-domain samples for RMS and peak measurement. When live audio is connected, level readings reflect the actual signal.
+Click **SWITCH TO SIMULATED TIMECODE** (visible at the bottom of the audio input panel when live mode is active, or **CONNECT AUDIO INPUT** switches back to live) to enter simulation mode.
 
-To use with real LTC: connect a timecode source to an audio interface, route the timecode track to the interface input, and use a virtual audio cable or loopback to route that input to the browser's microphone input.
+In simulation mode:
+- An internal LTC generator produces valid timecode at the selected frame rate.
+- Three sliders inject conditions: **Signal Level** (−70 to 0 dBFS), **Noise / Distortion** (0–100%), and **Dropout Probability** (0–50% per frame).
+- SNR is a synthetic estimate based on the noise slider; THD is computed from the noise slider.
 
-> **Note:** Full biphase decoding of live audio (reading actual HH:MM:SS:FF from the signal) is implemented in the `decodeBiphase()` and `parseLTCFrame()` functions and will be wired to the live path in a future revision. Currently, live audio provides real level analysis; the timecode digits in live mode are generated by the internal clock at the selected rate.
-
----
-
-## Architecture
-
-The analyzer is a single React component (`smpte-analyzer.jsx`) with no external runtime dependencies beyond React itself. All DSP, decoding logic, and rendering are self-contained.
-
-Key functions:
-
-| Function | Purpose |
-|---|---|
-| `computeRMS(buffer)` | RMS level from Float32 PCM buffer |
-| `computePeak(buffer)` | Peak level from Float32 PCM buffer |
-| `linearToDB(linear)` | Linear amplitude to dBFS |
-| `decodeBiphase(samples, sampleRate, fps)` | Biphase mark decoder; returns array of bits with error flags |
-| `parseLTCFrame(bits80)` | Validates sync word and extracts HH:MM:SS:FF and flags from 80-bit frame |
-| `isValidDropFrame(hh, mm, ss, ff, fps)` | Validates frame number against SMPTE drop-frame rule |
-| `tcToFrames(hh, mm, ss, ff, rateKey)` | Converts timecode to absolute frame count |
-| `generateSimulatedAnalysis(...)` | Produces simulated analysis data for the selected conditions |
-
-UI sub-components:
-
-| Component | Purpose |
-|---|---|
-| `TimecodeDisplay` | Main HH:MM:SS:FF readout |
-| `LevelMeter` | Horizontal bar meter with peak hold and color zones |
-| `StatusBadge` | Illuminated indicator for LOCK, DF, CF, CLIP, HOT, etc. |
-| `Gauge` | Horizontal bar for SNR, THD |
-| `BitStreamView` | 8×8 bit error map |
-| `RateDetector` | Rate confidence bars for all 12 rates |
-| `SpecRefPanel` | In-app SMPTE spec reference |
+The timecode card gets a fuchsia outline and a blinking **SIMULATING CODE** indicator while in this mode.
 
 ---
 
-## Planned Improvements
+## API Publisher
 
-- Wire live biphase decode to populate HH:MM:SS:FF from actual LTC signal
-- VITC (Vertical Interval Timecode) decode from video input via canvas capture
-- User bits display and decoding
-- Waveform oscilloscope view of the LTC signal
-- Session logging: export frame error log to CSV
-- Jitter measurement: frame-to-frame arrival time variance
+The app can publish timecode frames to the `smpte-bridge` sidecar over WebSocket. Enter the bridge URL in the **API PUBLISHER** section and click **PUBLISH**. The publisher reconnects automatically with exponential back-off if the bridge is not running.
+
+Every tick emits a `{type:"tc"}` message. Each error-state transition emits a `{type:"error"}` message. See `smpte-bridge/README.md` for the full schema.
 
 ---
 
@@ -302,3 +272,4 @@ UI sub-components:
 | Version | Date | Notes |
 |---|---|---|
 | 1.0 | 2026-05-12 | Initial release — LTC display, rate detection, level analysis, error flagging, simulation mode, live audio level measurement |
+| 1.1 | 2026-05-12 | Live biphase decode wired (MultiRateDecoder + AudioWorklet); auto rate detection; device picker; API publisher; session log; Web Worker tick |
