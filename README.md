@@ -2,6 +2,12 @@
 
 A browser-based Linear Timecode (LTC) analyzer built to the SMPTE ST 12-1:2014 and ST 12-2:2014 specifications. It decodes and displays timecode from a live audio input, detects frame rate and drop-frame mode automatically, measures signal level, and flags error conditions including clipping, low level, noise, and dropout.
 
+> ## ⚠️ Not for show-cue triggering
+>
+> This tool is for **viewing and analyzing** incoming timecode. It is **not** a show-control timecode source.
+>
+> Even though the bridge sidecar can re-broadcast the decoded timecode to other devices over WebSocket (and eventually OSC / Art-Net / MTC), the feed is intended for monitoring, logging, and debugging — not for driving live cues. The signal path runs through a browser tab, a Web Worker tick, and a Node fan-out; jitter, occasional dropped frames, and tab/permission interruptions are tolerable for analysis but **not** acceptable for cueing lights, audio playback, or video roll. Use a dedicated hardware or software timecode source (a slate, a deck, a chase device, or a purpose-built sync engine) for any production trigger path.
+
 ---
 
 ## Project Structure
@@ -248,7 +254,7 @@ To use with real LTC: connect a timecode source to an audio interface input and 
 
 ### Simulation Mode
 
-Click **SWITCH TO SIMULATED TIMECODE** (visible at the bottom of the audio input panel when live mode is active, or **CONNECT AUDIO INPUT** switches back to live) to enter simulation mode.
+Click **SWITCH TO SIMULATED TIMECODE** (visible at the bottom of the audio input panel when live mode is active), or **CONNECT AUDIO INPUT**  to enter live mode. The app defaults to LIVE mode, but simulation mode is available with simulated code to see how the analyses works in various situations.
 
 In simulation mode:
 - An internal LTC generator produces valid timecode at the selected frame rate.
