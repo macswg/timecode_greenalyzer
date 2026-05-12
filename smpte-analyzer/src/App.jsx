@@ -412,6 +412,11 @@ export default function SMPTEAnalyzer() {
   const [dropoutProb, setDropoutProb] = useState(0.002);
   const [analysis, setAnalysis] = useState(null);
   const [useRealAudio, setUseRealAudio] = useState(false);
+  // True from mount until either live audio is up OR the user has explicitly
+  // chosen simulation. Suppresses the simulator output during the ~1 s window
+  // while getUserMedia / AudioContext / Worklet are spinning up, so the user
+  // never sees a flash of wall-clock-derived simulated timecode on refresh.
+  const [bootstrapping, setBootstrapping] = useState(true);
   const [audioError, setAudioError] = useState(null);
   const [peakHold, setPeakHold] = useState(-60);
   const [frameCount, setFrameCount] = useState(0);
@@ -449,6 +454,9 @@ export default function SMPTEAnalyzer() {
   }
 
   const tick = useCallback(() => {
+    // During the bootstrap window we don't yet know which mode to render —
+    // skip the simulator so the user doesn't see a flash of wall-clock TC.
+    if (bootstrapping) return;
     let lvl = levelDbFS;
     let nz = noiseLevel;
     let dp = dropoutProb;
@@ -541,7 +549,7 @@ export default function SMPTEAnalyzer() {
     // Peak hold with decay
     peakDecayRef.current = Math.max(peakDecayRef.current - 0.3, data.peakDbFS);
     setPeakHold(peakDecayRef.current);
-  }, [rateKey, levelDbFS, noiseLevel, dropoutProb, useRealAudio]);
+  }, [rateKey, levelDbFS, noiseLevel, dropoutProb, useRealAudio, bootstrapping]);
 
   useEffect(() => { tickRef.current = tick; }, [tick]);
 
@@ -648,9 +656,11 @@ export default function SMPTEAnalyzer() {
       sourceRef.current = source;
       workletNodeRef.current = worklet;
       setUseRealAudio(true);
+      setBootstrapping(false);
       setAudioError(null);
     } catch (e) {
       console.error(e);
+      setBootstrapping(false);
       setAudioError(`Audio input failed: ${e.message || e}`);
     }
   }
@@ -701,6 +711,7 @@ export default function SMPTEAnalyzer() {
     setCurrentDeviceId(null);
     setCurrentDeviceLabel("");
     setUseRealAudio(false);
+    setBootstrapping(false);
   }
 
   const liveMode = useRealAudio;
@@ -789,7 +800,16 @@ export default function SMPTEAnalyzer() {
       </div>
 
       {/* Main TC Display */}
-      {simMode && (
+      {bootstrapping && (
+        <div style={{
+          fontSize:10, fontFamily:"monospace", letterSpacing:4,
+          color:"#666",
+          marginBottom:6,
+        }}>
+          ○ STARTING — requesting audio input…
+        </div>
+      )}
+      {!bootstrapping && simMode && (
         <div style={{
           fontSize:10, fontFamily:"monospace", letterSpacing:4,
           color:"#d946ef", textShadow:"0 0 8px rgba(217,70,239,0.5)",
@@ -799,7 +819,7 @@ export default function SMPTEAnalyzer() {
           ▲ SIMULATING CODE
         </div>
       )}
-      {liveMode && (
+      {!bootstrapping && liveMode && (
         <div style={{
           fontSize:10, fontFamily:"monospace", letterSpacing:4,
           color: ltcLocked ? "#22d3ee" : "#888",
@@ -812,8 +832,8 @@ export default function SMPTEAnalyzer() {
         </div>
       )}
       <div style={{
-        border: simMode ? "1px solid #d946ef" : "1px solid #1a1a1a",
-        boxShadow: simMode ? "0 0 16px rgba(217,70,239,0.25), inset 0 0 12px rgba(217,70,239,0.08)" : "none",
+        border: !bootstrapping && simMode ? "1px solid #d946ef" : "1px solid #1a1a1a",
+        boxShadow: !bootstrapping && simMode ? "0 0 16px rgba(217,70,239,0.25), inset 0 0 12px rgba(217,70,239,0.08)" : "none",
         borderRadius:4,
         padding:"24px 28px",
         marginBottom:16,
