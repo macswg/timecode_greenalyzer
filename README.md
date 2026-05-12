@@ -8,14 +8,8 @@ A browser-based Linear Timecode (LTC) analyzer built to the SMPTE ST 12-1:2014 a
 
 The analyzer is a single self-contained React component with no backend. You can run it two ways: inside Claude as an artifact, or locally in any React project.
 
-### Option 1 — Run as a Claude Artifact
 
-1. Open Claude and start a new conversation
-2. Upload `smpte-analyzer.jsx` or paste its contents
-3. Ask Claude to render it as an artifact
-4. It will run immediately in the artifact preview panel — no build step required
-
-### Option 2 — Run Locally with Vite
+### Option 1 — Run Locally with Vite
 
 **Prerequisites:** Node.js 18 or later
 
@@ -38,6 +32,16 @@ npm run dev
 ```
 
 Then open `http://localhost:5173` in your browser.
+
+
+### Option 2 — Run as a Claude Artifact
+
+1. Open Claude and start a new conversation
+2. Upload `smpte-analyzer.jsx` or paste its contents
+3. Ask Claude to render it as an artifact
+4. It will run immediately in the artifact preview panel — no build step required
+
+
 
 ### Option 3 — Drop into an Existing React Project
 
