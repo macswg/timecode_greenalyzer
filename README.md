@@ -6,8 +6,7 @@ A browser-based Linear Timecode (LTC) analyzer built to the SMPTE ST 12-1:2014 a
 
 ## Installation
 
-The analyzer is a single self-contained React component with no backend. You can run it two ways: inside Claude as an artifact, or locally in any React project.
-
+The analyzer is a single self-contained React component with no backend. You can run it two ways: locally in any React project, or inside Claude as an artifact.
 
 ### Option 1 — Run Locally with Vite
 
