@@ -187,17 +187,20 @@ function buttonStyle(color, { padding = "6px 16px", fontSize = 10, borderAlpha =
 
 // ─── Sub-components ──────────────────────────────────────────────────────────
 
-function TimecodeDisplay({ hh, mm, ss, ff, dropFrame, rateKey, valid }) {
+function TimecodeDisplay({ hh, mm, ss, ff, dropFrame, rateKey, valid, dim }) {
   const sep = dropFrame ? ";" : ":";
+  const color = dim ? "#333" : valid ? "#00ff88" : "#ff3b3b";
+  const textShadow = dim
+    ? "none"
+    : valid
+      ? "0 0 20px rgba(0,255,136,0.5), 0 0 40px rgba(0,255,136,0.2)"
+      : "0 0 20px rgba(255,59,59,0.5)";
   return (
     <div style={{
       fontFamily: "'Share Tech Mono', 'Courier New', monospace",
       fontSize: "clamp(32px, 6vw, 72px)",
       letterSpacing: "0.05em",
-      color: valid ? "#00ff88" : "#ff3b3b",
-      textShadow: valid
-        ? "0 0 20px rgba(0,255,136,0.5), 0 0 40px rgba(0,255,136,0.2)"
-        : "0 0 20px rgba(255,59,59,0.5)",
+      color, textShadow,
       transition: "color 0.1s, text-shadow 0.1s",
       fontWeight: 400,
     }}>
@@ -605,18 +608,35 @@ export default function SMPTEAnalyzer() {
     } catch { /* ignore */ }
   }
 
+  // Lazily get-or-create the single AudioContext for the app's lifetime.
+  // Reusing one context across device switches is critical on macOS: each
+  // `new AudioContext()` is a fresh Core Audio negotiation that can pull the
+  // system output along with it. Keep one context, swap the MediaStream.
+  async function getOrCreateAudioContext() {
+    if (audioCtxRef.current && audioCtxRef.current.state !== "closed") {
+      if (audioCtxRef.current.state === "suspended") {
+        try { await audioCtxRef.current.resume(); } catch { /* ignore */ }
+      }
+      return audioCtxRef.current;
+    }
+    const ctx = new AudioContext();
+    await ctx.audioWorklet.addModule("/ltc-worklet.js");
+    audioCtxRef.current = ctx;
+    sampleRateRef.current = ctx.sampleRate;
+    return ctx;
+  }
+
   async function startAudioCapture(deviceId) {
     try {
-      // Stop any previous stream so the OS releases the device before we
-      // try to reopen it (some drivers refuse a second concurrent grab).
+      // Disconnect any previous source/worklet so we can rebuild them on the
+      // same context. Stop the previous stream so the OS releases the device.
+      if (sourceRef.current) { try { sourceRef.current.disconnect(); } catch {} sourceRef.current = null; }
+      if (workletNodeRef.current) { try { workletNodeRef.current.disconnect(); } catch {} workletNodeRef.current = null; }
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(t => t.stop());
         streamRef.current = null;
       }
-      if (audioCtxRef.current) {
-        await audioCtxRef.current.close();
-        audioCtxRef.current = null;
-      }
+
       const constraints = {
         audio: {
           echoCancellation: false, noiseSuppression: false, autoGainControl: false,
@@ -630,28 +650,26 @@ export default function SMPTEAnalyzer() {
       setCurrentDeviceId(settings.deviceId || deviceId || null);
       setCurrentDeviceLabel(track?.label || "Unknown input");
       refreshAudioDevices();
-      const ctx = new AudioContext();
+
+      const ctx = await getOrCreateAudioContext();
       const source = ctx.createMediaStreamSource(stream);
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 2048;
       source.connect(analyser);
 
-      await ctx.audioWorklet.addModule("/ltc-worklet.js");
       // numberOfOutputs:0 makes the worklet a pure sink — process() runs as
       // long as inputs are flowing, and we never touch ctx.destination, so
-      // no output stream is opened. (Connecting to ctx.destination would
-      // cause macOS Core Audio to switch the system output when opening an
-      // input on an audio interface.)
+      // no output stream is opened on the context. (Connecting to
+      // ctx.destination would cause macOS Core Audio to switch the system
+      // output when opening an input on an audio interface.)
       const worklet = new AudioWorkletNode(ctx, "ltc-capture", { numberOfOutputs: 0 });
       const decoder = new MultiRateDecoder();
       decoderRef.current = decoder;
-      sampleRateRef.current = ctx.sampleRate;
       worklet.port.onmessage = (e) => {
         decoder.feed(e.data, sampleRateRef.current);
       };
       source.connect(worklet);
 
-      audioCtxRef.current = ctx;
       analyserRef.current = analyser;
       sourceRef.current = source;
       workletNodeRef.current = worklet;
@@ -699,14 +717,20 @@ export default function SMPTEAnalyzer() {
   }
 
   function stopAudio() {
+    // Tear down the input chain but keep the AudioContext alive (suspended)
+    // so we don't trigger another Core Audio negotiation if/when the user
+    // reconnects. Closing + recreating the context is what caused macOS to
+    // switch the system output during the round-trip.
+    if (sourceRef.current) { try { sourceRef.current.disconnect(); } catch {} sourceRef.current = null; }
+    if (workletNodeRef.current) { try { workletNodeRef.current.disconnect(); } catch {} workletNodeRef.current = null; }
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(t => t.stop());
       streamRef.current = null;
     }
-    if (audioCtxRef.current) audioCtxRef.current.close();
-    audioCtxRef.current = null;
+    if (audioCtxRef.current && audioCtxRef.current.state === "running") {
+      try { audioCtxRef.current.suspend(); } catch { /* ignore */ }
+    }
     analyserRef.current = null;
-    workletNodeRef.current = null;
     decoderRef.current = null;
     setCurrentDeviceId(null);
     setCurrentDeviceLabel("");
@@ -864,6 +888,7 @@ export default function SMPTEAnalyzer() {
             dropFrame={tc.dropFrame}
             rateKey={analysis?.rateKey ?? rateKey}
             valid={analysis?.frameValid !== false}
+            dim={bootstrapping}
           />
           <div style={{ display:"flex", flexDirection:"column", gap:8, alignItems:"flex-end" }}>
             <div style={{
@@ -872,19 +897,21 @@ export default function SMPTEAnalyzer() {
               textShadow:"0 0 12px rgba(255,170,0,0.4)",
               letterSpacing:2,
             }}>
-              {liveMode
-                ? (ltcLocked && analysis?.detectedRateKey
-                    ? SMPTE_RATES[analysis.detectedRateKey].label
-                    : "")
-                : (SMPTE_RATES[rateKey]?.label ?? "— —")}
-              {liveMode && (
+              {bootstrapping
+                ? ""
+                : liveMode
+                  ? (ltcLocked && analysis?.detectedRateKey
+                      ? SMPTE_RATES[analysis.detectedRateKey].label
+                      : "")
+                  : (SMPTE_RATES[rateKey]?.label ?? "— —")}
+              {!bootstrapping && liveMode && (
                 <span style={{ fontSize:9, color:"#22d3ee", letterSpacing:3, marginLeft: ltcLocked ? 8 : 0 }}>
                   {ltcLocked ? "DETECTED" : "DETECTING…"}
                 </span>
               )}
             </div>
             <div style={{ display:"flex", gap:6, flexWrap:"wrap", justifyContent:"flex-end" }}>
-              <StatusBadge label="LOCK" active={analysis?.frameValid !== false} color="#00ff88" />
+              <StatusBadge label="LOCK" active={!bootstrapping && analysis?.frameValid !== false} color="#00ff88" />
               <StatusBadge label="DF" active={tc.dropFrame} color="#ffaa00" />
               <StatusBadge label="CF" active={tc.colorFrame} color="#8888ff" />
             </div>
@@ -959,7 +986,15 @@ export default function SMPTEAnalyzer() {
 
       {/* Controls */}
       <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:12 }}>
-        {liveMode ? (
+        {bootstrapping ? (
+          <div style={{ ...PANEL, padding:14, display:"flex", flexDirection:"column", gap:10 }}>
+            <div style={{ fontSize:9, color:"#666", letterSpacing:3, marginBottom:4 }}>STARTING</div>
+            <div style={{ fontSize:10, color:"#444", fontFamily:"monospace" }}>
+              Requesting audio input. The simulator and live controls will
+              appear here once the mode is established.
+            </div>
+          </div>
+        ) : liveMode ? (
           <div style={{ ...PANEL, padding:14, display:"flex", flexDirection:"column", gap:14 }}>
             <div style={{ fontSize:9, color:"#22d3ee", letterSpacing:3, marginBottom:4 }}>LIVE INPUT STATUS</div>
             <div style={{ display:"grid", gridTemplateColumns:"auto 1fr", gap:"10px 18px", fontSize:11, fontFamily:"monospace" }}>
