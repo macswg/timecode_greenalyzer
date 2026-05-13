@@ -2,6 +2,8 @@
 
 A browser-based Linear Timecode (LTC) analyzer built to the SMPTE ST 12-1:2014 and ST 12-2:2014 specifications. It decodes and displays timecode from a live audio input, detects frame rate and drop-frame mode automatically, measures signal level, and flags error conditions including clipping, low level, noise, and dropout.
 
+For a full list of every on-screen indicator and where its value comes from, see [`INDICATORS.md`](INDICATORS.md).
+
 > ## ⚠️ Not for show-cue triggering
 >
 > This tool is for **viewing and analyzing** incoming timecode. It is **not** a show-control timecode source.
