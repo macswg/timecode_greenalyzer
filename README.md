@@ -110,7 +110,7 @@ The analyzer detects all frame rates defined in SMPTE ST 12-1 and ST 12-2:
 | 59.94 | 59.94 ND | 60000/1001 | No |
 | 60 | 60 ND | 60 | No |
 
-In live audio mode, rate detection is fully automatic: five `LtcDecoder` instances run in parallel at 24/25/30/50/60 fps candidates and the winner is chosen by frames-decoded score. NDF vs DF is resolved from the drop-frame flag in the parsed frame. A confidence bar shows the current lock strength.
+In live audio mode, rate detection is fully automatic: five `LtcDecoder` instances run in parallel at 24/25/30/50/60 fps candidates and the winner is chosen by frames-decoded score. NDF vs DF is resolved from the drop-frame flag in the parsed frame. Fractional rates (29.97 NDF, 23.976, 59.94 NDF) are distinguished from their integer counterparts by comparing the median measured frame span against the integer-rate expected span at a 1.0005× threshold. A confidence bar shows the current lock strength.
 
 ---
 
@@ -177,7 +177,7 @@ In biphase mark coding:
 - A **`1` bit** has an additional transition at the mid-point of the bit cell
 - A **`0` bit** has no mid-point transition
 
-The decoder measures the time between transitions. A short interval (≈ half bit-cell) indicates a `1`; a long interval (≈ full bit-cell) indicates a `0`. Intervals that fall outside the valid range (±25% tolerance) are flagged as bit errors.
+The decoder measures the time between transitions. A short interval (≈ half bit-cell) indicates a `1`; a long interval (≈ full bit-cell) indicates a `0`. Intervals that fall outside the valid range (±15% tolerance) are flagged as bit errors. A frame-span sanity check additionally rejects any 80-bit sequence whose total sample span deviates more than ±3% from the expected span for the candidate rate — this catches 24 vs 25 fps cross-locks that per-interval tolerance alone cannot separate.
 
 ---
 
@@ -199,9 +199,9 @@ The analyzer measures and displays:
 
 - **RMS level** — average signal energy, the primary level indicator for LTC
 - **Peak level** — instantaneous peak with hold and decay
-- **Noise floor** — estimated floor below the signal
-- **SNR** (Signal-to-Noise Ratio) — ratio of LTC-band spectral power to out-of-band power, in dB; shown only when locked to a live signal
-- **THD** (Total Harmonic Distortion) — percentage distortion; shown only in simulation mode (null in live mode)
+- **Noise floor** — median power at biphase spectral nulls (frequencies between LTC harmonics where the coding guarantees no signal energy), in dB; shown only when locked
+- **SNR** (Signal-to-Noise Ratio) — total signal-band energy vs noise-floor power projected across the same band, in dB; shown only when locked. EMA-smoothed for readability.
+- **THD** (Total Harmonic Distortion) — classical √(ΣP_h)/√(P_1)×100 across the 3rd/5th/7th odd harmonics of the bit-rate-half fundamental; shown only when locked. LTC's near-square wave has ideal THD ≈ 38%; values above that baseline indicate added distortion.
 
 ---
 
@@ -209,15 +209,15 @@ The analyzer measures and displays:
 
 Five error conditions are monitored and displayed as illuminated badges:
 
-| Badge | Color | Condition | Effect on Decode |
+| Badge | Color | Live condition | Sim condition |
 |---|---|---|---|
-| CLIP | Red | Signal > −1 dBFS | Zero-crossings shift; bit errors likely |
-| HOT | Orange | Signal > −6 dBFS | Elevated error rate |
-| LOW | Amber | Signal < −30 dBFS | Decoder may lose sync |
-| DROPOUT | Pink | Signal < −60 dBFS, or sudden dropout event | Complete frame loss |
-| NOISE | Purple | THD or noise above threshold | Spurious transitions; false bits |
+| CLIP | Red | Signal > −1 dBFS | Level slider above −1 dBFS |
+| HOT | Orange | Signal > −6 dBFS (and not CLIP) | Level slider above −6 dBFS |
+| LOW | Amber | Signal < −30 dBFS | Level slider below −30 dBFS |
+| DROPOUT | Pink | Signal < −60 dBFS | Level slider below −60 dBFS or random dropout roll |
+| NOISE | Purple | Not emitted in live mode | Noise slider above 15% |
 
-When any error badge is active, the main timecode display turns red to indicate the readout should not be trusted.
+In live mode the CLIP/HOT/LOW/DROPOUT tags come exclusively from real level measurements. NOISE is only active in simulation mode; in live mode signal quality is indicated by the SNR and THD gauges and the BIT ERRORS counter. When any error badge is active, the main timecode display turns red.
 
 ---
 
@@ -249,19 +249,29 @@ When live audio is active:
 - A device picker (`enumerateDevices`) lets you select among all available audio inputs. Switching reopens the stream with the selected `deviceId`. The app listens for `devicechange` events and updates the list automatically.
 - An `AudioWorklet` (`ltc-worklet.js`) runs on the audio thread and forwards every sample to the main thread without dropping any between reads. The `MultiRateDecoder` (`ltcDecoder.js`) receives these samples and runs five `LtcDecoder` instances in parallel at 24/25/30/50/60 fps. The winner is selected by score (frames decoded minus a weighted bit-error penalty, with a recency bonus for frames decoded within the last 500 ms).
 - The timecode digits (HH:MM:SS:FF) shown in the display come directly from the decoded LTC frame. If no valid frame has been decoded within ~200 ms, the display shows `00:00:00:00` and LOCK turns off.
-- SNR is computed from the FFT (`computeLtcSnr`) — it compares spectral power inside the LTC bit-rate band to power outside it. It is only populated when locked; otherwise it shows `—`.
-- THD is not computed in live mode and shows `—`.
+- SNR, THD, and noise floor are computed from the FFT (`computeLtcSpectralMetrics`) and only populated when locked; otherwise they show `—`. All three are EMA-smoothed (~0.5 Hz bandwidth, ~2 s settle) to reduce per-tick jitter.
+- A **Clock Drift** indicator in the LIVE INPUT STATUS panel shows deviation of the measured frame period from the exact expected SMPTE rate in parts-per-million. States: `SOLID` (<5 ppm, green), `DRIFTING` (5–50 ppm, orange), `OFF-RATE` (>50 ppm, red).
 
 To use with real LTC: connect a timecode source to an audio interface input and select that interface in the device picker.
 
+### File Analysis Mode
+
+The AUDIO INPUT panel accepts audio files via drag-and-drop anywhere on the panel, or by clicking **ANALYZE FILE…** / **REPLACE FILE**. The file is decoded by the Web Audio API and routed through the same biphase decoder as a live input. The file loops continuously.
+
+Key properties:
+- The file is **never connected to `ctx.destination`** — it is silent on the system output (ANALYSIS ONLY · NO OUTPUT).
+- For WAV files, the native sample rate from the file header is displayed alongside the context's resampled rate (Web Audio always resamples to the context's rate on decode).
+- The status label reads `FILE filename · Xs · LOOPED · ANALYSIS ONLY · NO OUTPUT` while a file is playing.
+- Click **STOP FILE** to tear down file playback and return to live audio input.
+
 ### Simulation Mode
 
-Click **SWITCH TO SIMULATED TIMECODE** (visible at the bottom of the audio input panel when live mode is active), or **CONNECT AUDIO INPUT**  to enter live mode. The app defaults to LIVE mode, but simulation mode is available with simulated code to see how the analyses works in various situations.
+Click **SWITCH TO SIMULATED TIMECODE** (visible at the bottom of the audio input panel when in live mode with no file playing), or **CONNECT AUDIO INPUT** to enter live mode. The app defaults to LIVE mode, but simulation mode is available to explore behavior under controlled conditions.
 
 In simulation mode:
 - An internal LTC generator produces valid timecode at the selected frame rate.
 - Three sliders inject conditions: **Signal Level** (−70 to 0 dBFS), **Noise / Distortion** (0–100%), and **Dropout Probability** (0–50% per frame).
-- SNR is a synthetic estimate based on the noise slider; THD is computed from the noise slider.
+- SNR and THD are synthetic estimates based on the noise slider. NOISE error tag is active when the noise slider exceeds 15%.
 
 The timecode card gets a fuchsia outline and a blinking **SIMULATING CODE** indicator while in this mode.
 
@@ -281,3 +291,4 @@ Every tick emits a `{type:"tc"}` message. Each error-state transition emits a `{
 |---|---|---|
 | 1.0 | 2026-05-12 | Initial release — LTC display, rate detection, level analysis, error flagging, simulation mode, live audio level measurement |
 | 1.1 | 2026-05-12 | Live biphase decode wired (MultiRateDecoder + AudioWorklet); auto rate detection; device picker; API publisher; session log; Web Worker tick |
+| 1.2 | 2026-05-12 | File-drop analysis path; `wireSourceToDecoder()` shared between mic and file paths; WAV native rate display; real SNR/THD/noise-floor via `computeLtcSpectralMetrics()`; EMA smoothing on gauges; clock drift/chase indicator; fractional rate detection (29.97 NDF / 23.976 / 59.94 NDF); frame-span sanity check; biphase tolerance tightened ±25% → ±15%; rate label color-coded (DF orange / NDF blue); B612 Mono timecode font; mobile responsive CSS; NOISE error tag removed from live mode |

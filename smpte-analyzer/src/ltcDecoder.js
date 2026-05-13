@@ -235,6 +235,36 @@ export class MultiRateDecoder {
     if (fps === 50) return "50";
     return null;
   }
+
+  // Clock drift in parts-per-million between the measured frame period and
+  // the exact expected period for the detected SMPTE rate (integer or
+  // 1.001-divided NTSC). Useful as a "chase" / sync indicator:
+  //   • ~0 ppm  → source is solid-lock to the detected nominal rate
+  //   • ±tens   → analog tape transport drift / minor varispeed
+  //   • hundreds+ → source not matching either standard rate; likely
+  //                 freewheeling or a non-standard generator
+  // Requires medianFrameSpan() to have stabilised (≥10 decoded frames).
+  driftPpm() {
+    const winner = this.winner;
+    if (!winner) return null;
+    const measured = this.medianFrameSpan();
+    if (measured == null) return null;
+    const dec = winner.dec;
+    const fps = winner.fps;
+    const lf = dec.lastFrame;
+    // Same fractional/integer classification as detectedRateKey().
+    let isFractional;
+    if (lf?.dropFrame && (fps === 30 || fps === 60)) {
+      isFractional = true;
+    } else if (fps === 25 || fps === 50) {
+      isFractional = false;
+    } else {
+      const expectedAtInteger = 79 * dec.samplesPerBit;
+      isFractional = (measured / expectedAtInteger) >= 1.0005;
+    }
+    const expected = 79 * dec.samplesPerBit * (isFractional ? 1.001 : 1.0);
+    return (measured - expected) / expected * 1e6;
+  }
 }
 
 export function rateKeyToNominalFps(rateKey) {

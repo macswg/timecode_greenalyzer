@@ -545,6 +545,18 @@ function SpecRefPanel() {
         <br/><span style={{color:"#777"}}>Gauge thresholds:</span>{" "}
         ≤50% green, 50–70% orange, &gt;70% red.
       </div>
+      <div style={{ marginTop:12, color:"#ff9900", letterSpacing:2, fontSize:13 }}>CLOCK DRIFT (ppm)</div>
+      <div style={{ color:"#555" }}>
+        Deviation of the measured frame period from the exact expected period
+        for the detected SMPTE rate (integer or 1.001-divided NTSC), expressed
+        in parts per million. Zero = locked. EMA-smoothed for steadiness.
+        <br/><span style={{color:"#777"}}>Expected for LTC:</span>{" "}
+        digital source ≈ 0 ppm (solid),
+        analog tape transport ±5–50 ppm (small drift),
+        free-wheeling generator &gt; 100 ppm (not matching standard rate).
+        <br/><span style={{color:"#777"}}>Status thresholds:</span>{" "}
+        &lt;5 ppm SOLID green, 5–50 DRIFTING orange, &gt;50 OFF-RATE red.
+      </div>
     </div>
   );
 }
@@ -583,7 +595,7 @@ export default function SMPTEAnalyzer() {
   // EMA state for the displayed SNR / THD / noise-floor gauges. The raw FFT
   // measurement is left untouched so the underlying math stays honest; only
   // the gauge readouts are smoothed to keep them legible.
-  const smoothedMetricsRef = useRef({ snr: null, thd: null, noiseFloor: null });
+  const smoothedMetricsRef = useRef({ snr: null, thd: null, noiseFloor: null, driftPpm: null });
 
   const [apiUrl, setApiUrl] = useState("ws://localhost:8765/ingest");
   const [apiEnabled, setApiEnabled] = useState(false);
@@ -661,14 +673,17 @@ export default function SMPTEAnalyzer() {
         sm.snr = smooth(sm.snr, m?.snr ?? null);
         sm.thd = smooth(sm.thd, Number.isFinite(m?.thd) ? m.thd : null);
         sm.noiseFloor = smooth(sm.noiseFloor, m?.noiseFloor ?? null);
+        sm.driftPpm = smooth(sm.driftPpm, dec?.driftPpm() ?? null);
         data.snr = sm.snr;
         data.noiseFloor = sm.noiseFloor;
         data.thd = sm.thd;
+        data.driftPpm = sm.driftPpm;
       } else {
         data.snr = null;
         data.thd = null;
         data.noiseFloor = null;
-        smoothedMetricsRef.current = { snr: null, thd: null, noiseFloor: null };
+        data.driftPpm = null;
+        smoothedMetricsRef.current = { snr: null, thd: null, noiseFloor: null, driftPpm: null };
       }
       // Real peak from the time-domain buffer (overrides the sim's jittered fake).
       data.peakDbFS = realPeakDb;
@@ -1332,7 +1347,7 @@ export default function SMPTEAnalyzer() {
                   {playingFile.name}
                 </div>
                 <div style={{ fontSize:11, color:"#555", letterSpacing:2 }}>
-                  {playingFile.durationSec.toFixed(1)}s · LOOPED · SILENT
+                  {playingFile.durationSec.toFixed(1)}s · LOOPED · ANALYSIS ONLY · NO OUTPUT
                 </div>
               </>
             ) : liveMode ? (
@@ -1480,6 +1495,25 @@ export default function SMPTEAnalyzer() {
                   ? `${playingFile.nativeSampleRate} Hz file · ${playingFile.decoderSampleRate} Hz decoded`
                   : `${sampleRateRef.current} Hz`}
               </span>
+              <span style={{ color:"#555", letterSpacing:2 }}>CLOCK DRIFT</span>
+              {(() => {
+                const d = analysis?.driftPpm;
+                if (!Number.isFinite(d)) {
+                  return <span style={{ color:"#666" }}>—</span>;
+                }
+                const abs = Math.abs(d);
+                // Solid lock < 5 ppm, mild drift up to 50 ppm, anything
+                // above ≈100 ppm indicates the source is not matching either
+                // standard SMPTE rate within transport-jitter tolerances.
+                const color = abs < 5 ? "#00ff88" : abs < 50 ? "#ffaa00" : "#ff3b3b";
+                const status = abs < 5 ? "SOLID" : abs < 50 ? "DRIFTING" : "OFF-RATE";
+                const sign = d > 0 ? "+" : d < 0 ? "−" : "";
+                return (
+                  <span style={{ color }}>
+                    {sign}{abs.toFixed(1)} ppm · {status}
+                  </span>
+                );
+              })()}
             </div>
             <div style={{ fontSize:10, color:"#333", letterSpacing:1, marginTop:4 }}>
               Auto-detecting from biphase bit rate (24 / 25 / 30 / 50 / 60 candidates run in parallel).

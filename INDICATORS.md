@@ -9,12 +9,17 @@ it means.
 
 ## Mode conventions
 
-Two modes drive the analyzer:
+Three modes drive the analyzer:
 
-- **Live mode (default):** audio flows from the selected input through the
+- **Live mode (default):** audio flows from the selected mic input through the
   `AudioWorklet` to `MultiRateDecoder`. Indicators are computed from the
   decoded LTC frames and from the FFT/time-domain analysis of the live
   buffer.
+- **File analysis mode:** an audio file dropped or picked via the AUDIO INPUT
+  panel is decoded and routed through the same `wireSourceToDecoder` path as
+  live audio. The decoder and all real-signal indicators work identically. The
+  file loops continuously and is silent on system output (never connected to
+  `ctx.destination`).
 - **Simulation mode:** the user has clicked **SWITCH TO SIMULATED
   TIMECODE**. The internal generator (`generateSimulatedAnalysis`) drives
   the display. Indicators that depend on real LTC decode (bit map, rate
@@ -36,7 +41,7 @@ hide; they show their dim state so the layout stays stable.
 | **LOCK** status badge | Active only when `frameValid === true` — requires positive evidence of a valid frame, not just absence of "false" | Always inactive |
 | **DF** status badge | Decoded `dropFrame` flag bit (bit 10 of the LTC frame) | Picked rate's drop-frame flag |
 | **CF** status badge | Decoded `colorFrame` flag bit (bit 11 of the LTC frame) | Hardcoded false |
-| Detected rate label (orange) | `MultiRateDecoder.detectedRateKey()` — fps from winning candidate + DF flag | Picked rate from dropdown |
+| Detected rate label | `MultiRateDecoder.detectedRateKey()` — fps from winning candidate + DF flag. **Color: orange (`#ffaa00`) for drop-frame rates, blue (`#3b9cff`) for non-drop.** Hidden during bootstrap; in live mode hidden until lock acquired. | Picked rate from dropdown. Same color rule applies. |
 | `DETECTED` / `DETECTING…` tag | Cyan when locked, grey otherwise | Hidden |
 
 ---
@@ -60,9 +65,9 @@ hide; they show their dim state so the layout stays stable.
 |---|---|---|
 | **RMS** meter | `20·log₁₀(computeRMS(buf))` on the live time-domain buffer | dBFS |
 | **PEAK** meter | `20·log₁₀(computePeak(buf))` on the live time-domain buffer | dBFS. Peak-hold bar decays at 0.3 dB/tick |
-| **SNR** gauge | `computeLtcSpectralMetrics()` — power ratio of LTC-band FFT bins to out-of-band bins | In dB. **Computed only when locked.** `—` otherwise — SNR is undefined without a signal. Rough guide: 20 dB = 10× noise, 40 dB clean, 60 dB broadcast-clean |
-| **THD** gauge | Not yet measured | `—` in live mode |
-| **NOISE FLOOR** readout | `10·log₁₀(mean out-of-band FFT bin power)` | In dB. Same lock condition as SNR — `—` otherwise |
+| **SNR** gauge | `computeLtcSpectralMetrics()` — total signal-band power [0.4–1.6×bitRate] vs noise-floor power projected across that same band. Noise floor sampled at biphase spectral nulls `(h+0.5)×f1`. | In dB. **Computed only when locked.** `—` otherwise. EMA-smoothed (~0.5 Hz). Gauge thresholds: ≥15 green, 10–15 orange, <10 red. (Numbers are lower than classical audio SNR because Blackman-window leakage limits the measurable floor.) |
+| **THD** gauge | `computeLtcSpectralMetrics()` — `√(P3+P5+P7)/√(P1)×100` for 3rd/5th/7th odd harmonics of `bitRate/2` fundamental. | In %. **Computed only when locked.** `—` otherwise. EMA-smoothed. LTC ideal ≈38%; above that indicates added distortion. Gauge thresholds: ≤50% green, 50–70% orange, >70% red. |
+| **NOISE FLOOR** readout | `10·log₁₀(median null-bin linear power)` — median of bins at biphase spectral nulls `(h+0.5)×f1` | In dB. **Computed only when locked.** `—` otherwise. EMA-smoothed. |
 
 Threshold colors (from `LEVEL_SPEC` in `App.jsx`, per SMPTE ST 12-1 §6):
 clip ≥ −1 dBFS · hot ≥ −6 · nominal −18 · low < −30 · dropout < −60.
@@ -129,13 +134,17 @@ a real biphase decode pass.
 In live mode, each tag is derived from a measured condition, never from
 randomness or sim slider defaults:
 
-| Tag | Live condition |
-|---|---|
-| **CLIP** | `lvl > −1 dBFS` |
-| **HOT** | `lvl > −6 dBFS` (and not CLIP) |
-| **LOW** | `lvl < −30 dBFS` |
-| **DROPOUT** | `lvl < −60 dBFS` |
-| **NOISE** | Real `snr < 20 dB` (only flagged when locked) |
+| Tag | Live condition | Sim condition |
+|---|---|---|
+| **CLIP** | `lvl > −1 dBFS` | Level slider > −1 dBFS |
+| **HOT** | `lvl > −6 dBFS` (and not CLIP) | Level slider > −6 dBFS |
+| **LOW** | `lvl < −30 dBFS` | Level slider < −30 dBFS |
+| **DROPOUT** | `lvl < −60 dBFS` | Level slider < −60 dBFS or random dropout roll |
+| **NOISE** | **Not emitted in live mode** | Noise slider > 15% |
+
+In live mode NOISE is intentionally absent. Signal quality in live mode is
+reported by the SNR and THD gauges and the BIT ERRORS counter — a boolean
+NOISE tag based on a crest-factor proxy or SNR threshold would be misleading.
 
 In sim mode the tags are driven by the sim error model, since that is the
 sim's purpose.
@@ -150,21 +159,28 @@ sim's purpose.
 | **LOCK STATE** | `● LOCKED` / `○ NO SIGNAL` from `ltcLocked` |
 | **FRAMES DECODED** | `MultiRateDecoder.framesDecoded` |
 | **BIT ERRORS** | `MultiRateDecoder.bitErrors` |
-| **INPUT LEVEL** | Currently shows `—` — the panel's RMS field is wired through `analysis.rmsDbFS` which isn't populated; the meters in SIGNAL LEVEL are the source of truth here |
-| **SAMPLE RATE** | `audioContext.sampleRate` (Hz) at the time the worklet was attached |
+| **INPUT LEVEL** | Shows `—` — `analysis.rmsDbFS` is not populated in the live path; the meters in SIGNAL LEVEL are the source of truth |
+| **SAMPLE RATE** | `audioContext.sampleRate` (Hz) for live mic input. When a file is playing: `{fileNativeRate} Hz file · {ctx.sampleRate} Hz decoded` — the native rate is parsed from the WAV RIFF header by `readWavSampleRate()`; non-WAV files show only the decoded rate |
+| **CLOCK DRIFT** | `MultiRateDecoder.driftPpm()`, EMA-smoothed. Deviation of measured frame period from exact expected SMPTE rate, in ppm. `—` until 10 decoded frames. States: `SOLID` (<5 ppm, green) · `DRIFTING` (5–50 ppm, orange) · `OFF-RATE` (>50 ppm, red) |
 
 ---
 
 ## AUDIO INPUT panel
 
-- **DEVICE** dropdown — populated by `navigator.mediaDevices.enumerateDevices()`,
-  filtered to `audioinput`. Selecting a different device tears down the
-  previous stream and rebuilds the source + worklet on the same
-  `AudioContext` (so the system output is not re-negotiated).
-- **● LIVE** indicator — active when a real stream is open.
-- **↻** button — refreshes the device list manually; the analyzer also
-  listens for `devicechange` events.
-- **▲ SWITCH TO SIMULATED TIMECODE** — only shown in live mode.
+The panel accepts drag-and-drop of audio files anywhere on its surface (cyan dashed outline on dragover).
+
+**When in live mic mode:**
+- **DEVICE** dropdown — populated by `navigator.mediaDevices.enumerateDevices()`, filtered to `audioinput`. Selecting a different device tears down the previous stream and rebuilds the source + worklet on the same `AudioContext` (so the system output is not re-negotiated). Only shown in live mic mode (hidden while a file is playing).
+- **● LIVE** indicator — active when a real mic stream is open.
+- **↻** button — refreshes the device list manually; the analyzer also listens for `devicechange` events.
+
+**File row (always visible):**
+- **FILE** label + **⇧ ANALYZE FILE…** / **⇧ REPLACE FILE** button — opens a file picker. Routes the file through `startFilePlayback()` → `wireSourceToDecoder()`.
+- **■ STOP FILE** button — visible only while a file is playing; returns to live mic input.
+- When a file is playing: header row shows `FILE {name} · {Xs} · LOOPED · ANALYSIS ONLY · NO OUTPUT`. The file is never connected to `ctx.destination`.
+- "drop a file on this panel" hint always visible as a reminder.
+
+**▲ SWITCH TO SIMULATED TIMECODE** — only shown in live mode when no file is playing.
 
 ---
 
