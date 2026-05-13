@@ -1479,7 +1479,7 @@ export default function SMPTEAnalyzer() {
               </button>
             )}
             {fileLoading && <span style={{ fontSize:11, color:"#22d3ee", letterSpacing:2 }}>DECODING…</span>}
-            <span style={{ fontSize:10, color:"#333", letterSpacing:1 }}>
+            <span style={{ fontSize:12, color:"#555", letterSpacing:1 }}>
               drop a file on this panel
             </span>
           </div>
