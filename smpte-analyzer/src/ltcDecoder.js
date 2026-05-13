@@ -122,9 +122,9 @@ export class LtcDecoder {
       // the drift readout. 120 frames ≈ 4 s at 30 fps.
       if (this.recentFrameSpans.length > 120) this.recentFrameSpans.shift();
       this.recentDecodeTimes.push(now);
-      // Cap at 600 entries (~10 s at 60 fps); time-based pruning is done by
-      // the consumer when computing the dropout rate.
-      if (this.recentDecodeTimes.length > 600) this.recentDecodeTimes.shift();
+      // Cap at 1500 entries (~25 s at 60 fps); time-based pruning is done by
+      // the consumer when computing the dropout rate or the winner score.
+      if (this.recentDecodeTimes.length > 1500) this.recentDecodeTimes.shift();
       // Keep just the sync word so we don't re-decode the same frame; the
       // next frame's bits will accumulate after it.
       this.bitBuf = buf.slice(n - 16);
@@ -223,6 +223,12 @@ export class MultiRateDecoder {
       this._prevFrameNumber = null;
       this._prevFrameTc = null;
     }
+    // If the signal stopped for ≥3 s and is now resuming, the previous
+    // break history is no longer relevant — start the new run clean.
+    if (this._prevDecodeT != null && (frame.t - this._prevDecodeT) > 3000) {
+      this.continuityBreaks = 0;
+      this.lastBreak = null;
+    }
     this._prevDecodeT = frame.t;
     const current = tcToFrameNumber(frame.hh, frame.mm, frame.ss, frame.ff, fps, frame.dropFrame);
     if (this._prevFrameNumber != null) {
@@ -243,12 +249,30 @@ export class MultiRateDecoder {
   }
 
   _pickWinner() {
+    // Score on a 20-second window of successful decodes, not cumulative
+    // counts. With cumulative scoring, a long-running winner amasses
+    // framesDecoded into the thousands while every other candidate
+    // accumulates bit errors from running against the wrong rate. When the
+    // input rate then changes, the *new* correct decoder starts at near-zero
+    // recent frames but inherits all of those stale wrong-rate bit errors —
+    // the cumulative score keeps the old decoder ahead for ~60 s until the
+    // new one's framesDecoded catches up. A page refresh hid the bug because
+    // all counters started at 0. Windowed counts decay naturally.
+    const now = performance.now();
+    const cutoff = now - 20000;
     let bestScore = -Infinity, bestIdx = -1;
     for (let i = 0; i < this.decoders.length; i++) {
       const d = this.decoders[i].dec;
-      // Score: rewards recent locks, penalises sustained bit errors.
-      const recencyBonus = (d.lastFrame && performance.now() - d.lastFrame.t < 500) ? 1000 : 0;
-      const score = d.framesDecoded - d.bitErrors * 0.1 + recencyBonus;
+      // recentDecodeTimes is appended chronologically; count entries inside
+      // the window by walking from the tail.
+      let recentFrames = 0;
+      const times = d.recentDecodeTimes;
+      for (let j = times.length - 1; j >= 0; j--) {
+        if (times[j] >= cutoff) recentFrames++;
+        else break;
+      }
+      const recencyBonus = (d.lastFrame && now - d.lastFrame.t < 500) ? 1000 : 0;
+      const score = recentFrames + recencyBonus;
       if (score > bestScore && d.lastFrame) { bestScore = score; bestIdx = i; }
     }
     this.winnerIdx = bestIdx;
@@ -332,6 +356,21 @@ export class MultiRateDecoder {
     const dec = winner.dec;
     const times = dec.recentDecodeTimes;
     if (!times || times.length === 0) return null;
+    const now = performance.now();
+    // No live signal: most recent decode is stale. Without this guard, the
+    // metric would report ~100% any time code stops rolling (silence after
+    // a take, signal disconnected, etc.) instead of surfacing "no signal".
+    if (now - times[times.length - 1] > 500) return null;
+    // Adapt the window to however much history we actually have, down to a
+    // floor of 0.5 s. This avoids two failure modes:
+    //   • Full windowSec required → just-acquired lock reports near-100%
+    //     dropout because only the first few frames count against the full
+    //     expected count.
+    //   • No floor → a single recent decode looks like 100% lock over a
+    //     micro-window, which over-reports confidence at the very first frame.
+    const historyMs = now - times[0];
+    if (historyMs < 500) return null;
+    const effectiveWindowSec = Math.min(windowSec, historyMs / 1000);
     const fps = winner.fps;
     // Use the detected (possibly fractional) rate for the expected count.
     const lf = dec.lastFrame;
@@ -344,7 +383,6 @@ export class MultiRateDecoder {
       isFractional = measured != null && (measured / expectedAtInteger) >= 1.0005;
     }
     const actualFps = fps / (isFractional ? 1.001 : 1);
-    const now = performance.now();
     const cutoff = now - windowSec * 1000;
     let count = 0;
     for (let i = times.length - 1; i >= 0; i--) {
