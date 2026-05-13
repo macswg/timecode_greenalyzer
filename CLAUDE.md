@@ -27,8 +27,8 @@ Correctness checks are manual: open the browser, grant microphone access, feed r
 
 | File | Concern |
 |---|---|
-| `smpte-analyzer/src/App.jsx` | Root component: all React state, UI layout, audio capture setup, tick wiring, mode switching, session log, publisher integration |
-| `smpte-analyzer/src/ltcDecoder.js` | DSP: `LtcDecoder` (biphase decode with rolling state), `MultiRateDecoder` (parallel-rate auto-detection), `parseFrame`, rate key helpers |
+| `smpte-analyzer/src/App.jsx` | Root component: all React state, UI layout, audio capture setup, tick wiring, mode switching, file-drop analysis, session log, publisher integration |
+| `smpte-analyzer/src/ltcDecoder.js` | DSP: `LtcDecoder` (biphase decode with rolling state), `MultiRateDecoder` (parallel-rate auto-detection, `driftPpm()`, `medianFrameSpan()`, `detectedRateKey()`), `parseFrame`, rate key helpers |
 | `smpte-analyzer/src/publisher.js` | Transport: reconnecting WebSocket `Publisher` class |
 | `smpte-analyzer/src/tickWorker.js` | Tick source: Web Worker that fires `{type:"tick"}` at ~30 Hz, immune to tab-backgrounding throttle |
 | `smpte-analyzer/public/ltc-worklet.js` | Audio thread: `LtcCapture` AudioWorklet that forwards every sample to the main thread (no drops) |
@@ -40,12 +40,13 @@ Correctness checks are manual: open the browser, grant microphone access, feed r
 
 1. `getUserMedia` (with `echoCancellation`, `noiseSuppression`, `autoGainControl` all off) opens the selected device.
 2. `getOrCreateAudioContext()` lazily constructs a single `AudioContext` for the app's lifetime, registers the worklet module once, and reuses it across device switches. `stopAudio()` suspends the context (does not close it). Reusing one context is critical on macOS: each `new AudioContext()` triggers a fresh Core Audio negotiation that can switch the system output device when an audio interface is selected as input.
-3. The single `AudioContext` hosts two parallel graphs from the same `MediaStreamSource`:
-   - `AnalyserNode` (fftSize 2048) — used for RMS, peak, and FFT-based SNR.
+3. The single `AudioContext` hosts two parallel graphs from the same source node (mic or file):
+   - `AnalyserNode` (fftSize 2048, `minDecibels=-120`, `maxDecibels=0`, `smoothingTimeConstant=0`) — used for RMS, peak, and FFT-based spectral metrics. Measurement-grade settings (not VU-visualisation defaults).
    - `AudioWorkletNode` (`ltc-capture`, `numberOfOutputs:0`) — forwards Float32 sample chunks to the main thread without opening any system output stream. The `numberOfOutputs:0` matters on macOS: connecting a node to `ctx.destination` would cause Core Audio to switch the system output when an audio interface is the input.
-4. The worklet's `port.onmessage` feeds samples to `MultiRateDecoder.feed()`.
-5. `MultiRateDecoder` runs five `LtcDecoder` instances (24/25/30/50/60 fps) in parallel. Each decoder maintains rolling biphase decode state across chunks. Winner selection: `framesDecoded - bitErrors×0.1 + recencyBonus(1000 if frame < 500 ms old)`. The winner's `detectedRateKey()` maps decoded fps + dropFrame flag to a SMPTE rate key string.
-6. On each tick (~33 ms via Web Worker), `App.jsx` reads `decoderRef.current.lastFrame`. If the frame is less than 200 ms old, it is treated as live and its HH:MM:SS:FF populates the display. Otherwise the display shows zeros and LOCK turns off.
+4. Wiring of source → analyser + worklet is encapsulated in `wireSourceToDecoder(ctx, source)`, which is shared between the live-mic path (`startAudioCapture`) and the file-playback path (`startFilePlayback`). `teardownCurrentSource()` tears down whatever source is currently active before a new one is wired.
+5. The worklet's `port.onmessage` feeds samples to `MultiRateDecoder.feed()`.
+6. `MultiRateDecoder` runs five `LtcDecoder` instances (24/25/30/50/60 fps) in parallel. Each decoder maintains rolling biphase decode state across chunks. Winner selection: `framesDecoded - bitErrors×0.1 + recencyBonus(1000 if frame < 500 ms old)`. The winner's `detectedRateKey()` maps decoded fps + dropFrame flag + median frame span to a SMPTE rate key string, distinguishing fractional rates (29.97 NDF, 23.976, 59.94 NDF) from integer counterparts.
+7. On each tick (~33 ms via Web Worker), `App.jsx` reads `decoderRef.current.lastFrame`. If the frame is less than 200 ms old, it is treated as live and its HH:MM:SS:FF populates the display. Otherwise the display shows zeros and LOCK turns off.
 
 ### Tick architecture
 
@@ -55,9 +56,17 @@ Correctness checks are manual: open the browser, grant microphone access, feed r
 
 Switching between live and simulation modes calls `setUseRealAudio()`, which triggers a `useEffect` that clears `analysis`, resets `peakHold` to −60, and resets `peakDecayRef`. This ensures the displayed detection state (confidence bar, rate label, lock indicator) visibly clears and re-acquires on switch rather than carrying stale values over.
 
-### SNR computation in live mode
+### Spectral metrics in live mode
 
-`computeLtcSnr(analyser, sampleRate, nominalFps)` sums FFT bin power in the band `[bitRate×0.4, bitRate×1.6]` (where `bitRate = nominalFps × 80`) and compares it to average power per bin outside that band. It returns `null` if the spectrum is silent, which causes the SNR Gauge to display `—`. SNR is only computed when `ltcLocked` is true; otherwise both `snr` and `thd` are set to `null`.
+`computeLtcSpectralMetrics(analyser, sampleRate, nominalFps)` returns `{snr, noiseFloor, thd}` (or `null` on failure):
+
+- **SNR**: total power in `[bitRate×0.4, bitRate×1.6]` divided by noise-floor power projected across the same band width. Noise floor is sampled at biphase spectral nulls — frequencies exactly halfway between consecutive LTC harmonics `(h+0.5)×f1` — where the biphase coding guarantees no signal energy. Median of those null bins is taken for robustness.
+- **Noise floor**: `10×log₁₀(median null-bin linear power)` in dB.
+- **THD**: classical `√(ΣP_h)/√(P_1)×100` across the 3rd/5th/7th odd harmonics of `f1 = bitRate/2`. Each harmonic peak is found within ±10% of its target frequency to tolerate clock drift.
+
+All three are `null` when not locked. The `AnalyserNode` is configured with `smoothingTimeConstant=0` so the FFT reflects the actual current block rather than a temporally averaged spectrum.
+
+Displayed values are EMA-smoothed via `smoothedMetricsRef` (alpha=0.025, ~0.5 Hz effective bandwidth, ~2 s settle). `driftPpm` is also EMA-smoothed. The refs reset to `null` on lock loss.
 
 ### Bootstrap state
 
@@ -71,10 +80,11 @@ A `bootstrapping` flag is `true` from mount until either live audio successfully
 
 `bootstrapping` is cleared to `false` in `startAudioCapture()` on both success and failure paths.
 
-### Two input modes
+### Three input modes
 
 - **Live mode (default):** app calls `startAudioCapture()` on mount. Timecode digits come from the biphase decoder. If the browser blocks `getUserMedia` before a user gesture, the app surfaces an error and falls back to simulation mode.
-- **Simulation mode:** accessed by clicking **SWITCH TO SIMULATED TIMECODE** in the audio input panel. `generateSimulatedAnalysis()` produces fake timecode and level data. The timecode card shows a fuchsia outline and a blinking **SIMULATING CODE** indicator.
+- **File analysis mode:** drop an audio file on the AUDIO INPUT panel or click **ANALYZE FILE…**. `startFilePlayback(file)` reads the file's `arrayBuffer`, calls `ctx.decodeAudioData` (which resamples to the context rate), creates a looping `AudioBufferSourceNode`, and passes it to `wireSourceToDecoder`. For WAV files, `readWavSampleRate(arrayBuffer)` parses the native sample rate from the RIFF header before decoding so the LIVE INPUT STATUS panel can display both the native and decoder rates. The source is **never connected to `ctx.destination`** — the file is silent on system output.
+- **Simulation mode:** accessed by clicking **SWITCH TO SIMULATED TIMECODE** (only shown in live mode when no file is playing). `generateSimulatedAnalysis()` produces fake timecode and level data. The timecode card shows a fuchsia outline and a blinking **SIMULATING CODE** indicator.
 
 ### Drop-frame rule (load-bearing)
 
@@ -105,9 +115,12 @@ Wire payload shapes:
 ## Conventions
 
 - Plain React function components with hooks (`useState`, `useEffect`, `useRef`, `useCallback`) — no class components, no state library, no TypeScript.
-- Tailwind-style utility classes are used inline. Fonts (`Share Tech Mono`, `Orbitron`) load via a runtime CSS `@import` from Google Fonts inside `App.jsx`.
-- `App.jsx` is organized in layers top-to-bottom: spec constants → drop-frame helpers → DSP functions → formatting helpers → shared style tokens → UI sub-components → root component. Preserve this layout when adding code.
+- Tailwind-style utility classes are used inline. Fonts (`Share Tech Mono`, `Orbitron`, `B612 Mono`) load via a runtime CSS `@import` from Google Fonts inside `App.jsx`. The timecode display is hardcoded to `B612 Mono` (designed for aircraft cockpit displays). There is no runtime font picker.
+- `App.jsx` is organized in layers top-to-bottom: spec constants → drop-frame helpers → DSP functions (`computeRMS`, `computePeak`, `linearToDB`, `readWavSampleRate`, `computeLtcSpectralMetrics`) → simulation generator → formatting helpers → shared style tokens → UI sub-components → root component. Preserve this layout when adding code.
 - `smpte-analyzer` has no external runtime dependencies beyond React. `smpte-bridge` depends only on the `ws` package.
 - Spec constants (`SMPTE_RATES`, `LEVEL_SPEC`) encode the standard. Do not adjust them to make things work; they are authoritative.
-- `_snrBins` is a module-level `Float32Array` cache reused by `computeLtcSnr` across ticks to avoid per-tick allocation. `timeBufRef` is a component-level ref serving the same purpose for `getFloatTimeDomainData`. `PANEL` is a module-level const for the standard panel box style; `buttonStyle(color, opts?)` is a helper for consistent button styling.
+- `_snrBins` is a module-level `Float32Array` cache reused by `computeLtcSpectralMetrics` across ticks to avoid per-tick allocation. `timeBufRef` is a component-level ref serving the same purpose for `getFloatTimeDomainData`. `PANEL` is a module-level const for the standard panel box style; `buttonStyle(color, opts?)` is a helper for consistent button styling.
+- `smoothedMetricsRef` holds `{ snr, thd, noiseFloor, driftPpm }` — the EMA state for the four displayed live metrics. Reset to `null` on lock loss.
 - `TimecodeDisplay` accepts a `dim` prop: when true, digits render in `#333` with no glow (used during bootstrap).
+- The live error tag list is derived strictly from real level measurements (`CLIP`, `HOT`, `LOW`, `DROPOUT`). `NOISE` is not emitted in live mode; it appears only in the sim path from `generateSimulatedAnalysis`.
+- Rate label next to the timecode is color-coded: orange (`#ffaa00`) for drop-frame rates (matches the DF badge), blue (`#3b9cff`) for non-drop. Hidden during bootstrap and in live mode until lock is acquired.
