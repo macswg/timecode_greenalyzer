@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This repo contains two sub-projects:
 
-- `smpte-analyzer/` — a Vite + React app implementing an SMPTE LTC analyzer per ST 12-1:2014 and ST 12-2:2014. Runs fully in the browser using the Web Audio API.
+- `smpte-analyzer/` — a Vite + React app implementing an SMPTE LTC analyzer per ST 12-1:2014. Runs fully in the browser using the Web Audio API. **LTC only** — VITC (in video vertical interval) and ATC (embedded in SDI/HDMI ancillary data) are not decoded.
 - `smpte-bridge/` — a Node.js WebSocket sidecar that ingests the timecode feed from the analyzer and fans it out to subscribers.
 
 There is no top-level package.json. Each sub-project has its own.
@@ -28,7 +28,7 @@ Correctness checks are manual: open the browser, grant microphone access, feed r
 | File | Concern |
 |---|---|
 | `smpte-analyzer/src/App.jsx` | Root component: all React state, UI layout, audio capture setup, tick wiring, mode switching, file-drop analysis, session log, publisher integration |
-| `smpte-analyzer/src/ltcDecoder.js` | DSP: `LtcDecoder` (biphase decode with rolling state), `MultiRateDecoder` (parallel-rate auto-detection, `driftPpm()`, `medianFrameSpan()`, `detectedRateKey()`), `parseFrame`, rate key helpers |
+| `smpte-analyzer/src/ltcDecoder.js` | DSP: `LtcDecoder` (biphase decode with rolling state; `pendingFrames` queue for continuity tracking; `recentDecodeTimes` for dropout rate), `MultiRateDecoder` (parallel-rate auto-detection, `driftPpm()`, `dropoutPct()`, `medianFrameSpan()`, `detectedRateKey()`, `_checkFrameContinuity()`), `tcToFrameNumber()`, `tcString()`, `parseFrame`, rate key helpers |
 | `smpte-analyzer/src/publisher.js` | Transport: reconnecting WebSocket `Publisher` class |
 | `smpte-analyzer/src/tickWorker.js` | Tick source: Web Worker that fires `{type:"tick"}` at ~30 Hz, immune to tab-backgrounding throttle |
 | `smpte-analyzer/public/ltc-worklet.js` | Audio thread: `LtcCapture` AudioWorklet that forwards every sample to the main thread (no drops) |
@@ -46,6 +46,10 @@ Correctness checks are manual: open the browser, grant microphone access, feed r
 4. Wiring of source → analyser + worklet is encapsulated in `wireSourceToDecoder(ctx, source)`, which is shared between the live-mic path (`startAudioCapture`) and the file-playback path (`startFilePlayback`). `teardownCurrentSource()` tears down whatever source is currently active before a new one is wired.
 5. The worklet's `port.onmessage` feeds samples to `MultiRateDecoder.feed()`.
 6. `MultiRateDecoder` runs five `LtcDecoder` instances (24/25/30/50/60 fps) in parallel. Each decoder maintains rolling biphase decode state across chunks. Winner selection: `framesDecoded - bitErrors×0.1 + recencyBonus(1000 if frame < 500 ms old)`. The winner's `detectedRateKey()` maps decoded fps + dropFrame flag + median frame span to a SMPTE rate key string, distinguishing fractional rates (29.97 NDF, 23.976, 59.94 NDF) from integer counterparts.
+   - After picking the winner, `MultiRateDecoder.feed()` drains the winner's `pendingFrames` queue and calls `_checkFrameContinuity()` per frame. A single 2048-sample worklet chunk (~42 ms at 48 kHz) can contain more than one LTC frame at 30 fps; checking `lastFrame` per chunk would miss intermediate frames and produce spurious JUMP breaks. Non-winner queues are discarded.
+   - `_checkFrameContinuity()` uses `tcToFrameNumber()` to compute an absolute frame count and compares it to the previous count. Any delta other than +1 increments `continuityBreaks` and updates `lastBreak {type, delta, from, to, t}`. If the gap between consecutive decoded frames exceeds 500 ms, continuity state resets rather than reporting a spurious jump.
+   - `dropoutPct(windowSec=2)` counts decoded frames in `recentDecodeTimes` within the window and divides by expected count (`windowSec × detected_actual_fps`). Returns 0–100 or null if not yet established.
+   - `driftPpm()` uses the **mean** (not median) of `recentFrameSpans` for sub-sample precision. Per-frame span is integer-resolution; the median snaps to the nearest sample and produces hundreds-of-ppm bias for fractional rates; the mean recovers sub-sample precision from the natural jitter. `recentFrameSpans` is capped at 120 frames (~4 s at 30 fps). Median is still used for fractional/integer rate classification in both `driftPpm()` and `detectedRateKey()` (median is more robust to outliers for classification).
 7. On each tick (~33 ms via Web Worker), `App.jsx` reads `decoderRef.current.lastFrame`. If the frame is less than 200 ms old, it is treated as live and its HH:MM:SS:FF populates the display. Otherwise the display shows zeros and LOCK turns off.
 
 ### Tick architecture
@@ -111,6 +115,7 @@ The 80-bit frame structure (BCD digits, flags, user bits, sync word `00111111111
 Wire payload shapes:
 - `tc` tick: `{type:"tc", t, seq, hh, mm, ss, ff, rate, dropFrame, source, levelDbFS, errors}` — `seq` is a publisher-monotonic counter appended by `Publisher.send()`. `rate` is the SMPTE rate key string (e.g. `"29.97df"`); `dropFrame` is boolean. Both rate fields are always present; they are redundant but explicit.
 - `error` transition: `{type:"error", t, seq, tc, rate, errors}` — `tc` is a formatted string using `;` as the frame separator for drop-frame.
+- `continuity` break: `{type:"continuity", t, seq, breakType, delta, from, to, rate}` — emitted per continuity break. `breakType` is `"REPEAT"` (delta = 0), `"JUMP"` (delta > 1), or `"REWIND"` (delta < 0). `from` and `to` are formatted timecode strings. Each break is also written to the session log with `errors: ["TC_REPEAT"|"TC_JUMP"|"TC_REWIND", "+Δ"]`.
 
 ## Conventions
 
@@ -120,7 +125,7 @@ Wire payload shapes:
 - `smpte-analyzer` has no external runtime dependencies beyond React. `smpte-bridge` depends only on the `ws` package.
 - Spec constants (`SMPTE_RATES`, `LEVEL_SPEC`) encode the standard. Do not adjust them to make things work; they are authoritative.
 - `_snrBins` is a module-level `Float32Array` cache reused by `computeLtcSpectralMetrics` across ticks to avoid per-tick allocation. `timeBufRef` is a component-level ref serving the same purpose for `getFloatTimeDomainData`. `PANEL` is a module-level const for the standard panel box style; `buttonStyle(color, opts?)` is a helper for consistent button styling.
-- `smoothedMetricsRef` holds `{ snr, thd, noiseFloor, driftPpm }` — the EMA state for the four displayed live metrics. Reset to `null` on lock loss.
+- `smoothedMetricsRef` holds `{ snr, thd, noiseFloor, driftPpm, dropoutPct }` — the EMA state for the five displayed live metrics. Reset to `null` on lock loss.
 - `TimecodeDisplay` accepts a `dim` prop: when true, digits render in `#333` with no glow (used during bootstrap).
 - The live error tag list is derived strictly from real level measurements (`CLIP`, `HOT`, `LOW`, `DROPOUT`). `NOISE` is not emitted in live mode; it appears only in the sim path from `generateSimulatedAnalysis`.
 - Rate label next to the timecode is color-coded: orange (`#ffaa00`) for drop-frame rates (matches the DF badge), blue (`#3b9cff`) for non-drop. Hidden during bootstrap and in live mode until lock is acquired.

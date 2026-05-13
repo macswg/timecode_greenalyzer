@@ -24,6 +24,8 @@ export class LtcDecoder {
     this.lastBitTime = 0;
     this.samplesPerBit = 0;         // set on first feed()
     this.recentFrameSpans = [];     // rolling window of actual sample spans for the last decoded frames
+    this.recentDecodeTimes = [];    // wall-clock timestamps of recent successful decodes (for dropout rate)
+    this.pendingFrames = [];        // frames decoded since the consumer last drained — needed for continuity tracking when a single audio chunk produces more than one frame
   }
 
   feed(samples, sampleRate, nominalFps) {
@@ -107,11 +109,22 @@ export class LtcDecoder {
     const f = buf.slice(n - 80);
     const parsed = parseFrame(f);
     if (parsed) {
-      this.lastFrame = { ...parsed, t: performance.now() };
+      const now = performance.now();
+      const frame = { ...parsed, t: now };
+      this.lastFrame = frame;
+      this.pendingFrames.push(frame);
       this.lastFrameBits = Uint8Array.from(f);
       this.framesDecoded++;
       this.recentFrameSpans.push(frameSamples);
-      if (this.recentFrameSpans.length > 30) this.recentFrameSpans.shift();
+      // Larger window than strictly needed for median (used for rate
+      // classification, ≥10 entries is enough) so that the mean over the
+      // whole buffer has enough samples to recover sub-sample precision for
+      // the drift readout. 120 frames ≈ 4 s at 30 fps.
+      if (this.recentFrameSpans.length > 120) this.recentFrameSpans.shift();
+      this.recentDecodeTimes.push(now);
+      // Cap at 600 entries (~10 s at 60 fps); time-based pruning is done by
+      // the consumer when computing the dropout rate.
+      if (this.recentDecodeTimes.length > 600) this.recentDecodeTimes.shift();
       // Keep just the sync word so we don't re-decode the same frame; the
       // next frame's bits will accumulate after it.
       this.bitBuf = buf.slice(n - 16);
@@ -145,6 +158,26 @@ function parseFrame(b) {
   return { hh, mm, ss, ff, dropFrame, colorFrame };
 }
 
+// Absolute frame number for a HH:MM:SS:FF timecode. Used by continuity
+// detection — consecutive in-order LTC frames must differ by exactly 1.
+// `fps` here is the NOMINAL integer rate (24, 25, 30, 50, 60); both NTSC
+// fractional variants (29.97 / 23.976 / 59.94) use the same integer for
+// frame-count math because they just slow the clock, not the count.
+function tcToFrameNumber(hh, mm, ss, ff, fps, dropFrame) {
+  if (!dropFrame) {
+    return ((hh * 60 + mm) * 60 + ss) * fps + ff;
+  }
+  const dropPerMin = fps === 60 ? 4 : 2;
+  const totalMins = hh * 60 + mm;
+  const dropped = dropPerMin * (totalMins - Math.floor(totalMins / 10));
+  return ((hh * 60 + mm) * 60 + ss) * fps + ff - dropped;
+}
+
+function tcString(lf) {
+  const p = n => String(n).padStart(2, "0");
+  return `${p(lf.hh)}:${p(lf.mm)}:${p(lf.ss)}${lf.dropFrame ? ";" : ":"}${p(lf.ff)}`;
+}
+
 // Run several LtcDecoders at candidate fps in parallel and pick the winner
 // by recent score (frames decoded - bit errors). This is how we auto-detect
 // incoming rate without asking the user.
@@ -154,11 +187,59 @@ export class MultiRateDecoder {
   constructor() {
     this.decoders = CANDIDATE_FPS.map(fps => ({ fps, dec: new LtcDecoder() }));
     this.winnerIdx = -1;
+    // Continuity tracking — flags when the incoming LTC's HH:MM:SS:FF
+    // doesn't advance by exactly one frame between consecutive successful
+    // decodes (catches edit splices, dropout-induced jumps, freewheel
+    // resets, and free-running generators that aren't actually counting).
+    this._prevFrameNumber = null;
+    this._prevFrameTc = null;
+    this._prevDecodeT = null;
+    this.continuityBreaks = 0;
+    this.lastBreak = null;  // { type, delta, from, to, t }
   }
 
   feed(samples, sampleRate) {
     for (const { fps, dec } of this.decoders) dec.feed(samples, sampleRate, fps);
     this._pickWinner();
+    // Drain the winning decoder's pending frames so every decoded frame
+    // gets its own continuity check — a single audio chunk can contain
+    // more than one LTC frame, and checking only `lastFrame` per chunk
+    // would miss intermediate frames and produce spurious JUMP breaks.
+    const winner = this.winner;
+    const fps = this.nominalFps;
+    if (winner && fps != null) {
+      for (const frame of winner.dec.pendingFrames) {
+        this._checkFrameContinuity(frame, fps);
+      }
+    }
+    // Clear all candidates' queues — non-winners' decodes are discarded.
+    for (const { dec } of this.decoders) dec.pendingFrames = [];
+  }
+
+  _checkFrameContinuity(frame, fps) {
+    // If we've been unlocked for ≥500 ms, reset rather than report a
+    // spurious "jump" across the gap.
+    if (this._prevDecodeT != null && (frame.t - this._prevDecodeT) > 500) {
+      this._prevFrameNumber = null;
+      this._prevFrameTc = null;
+    }
+    this._prevDecodeT = frame.t;
+    const current = tcToFrameNumber(frame.hh, frame.mm, frame.ss, frame.ff, fps, frame.dropFrame);
+    if (this._prevFrameNumber != null) {
+      const delta = current - this._prevFrameNumber;
+      if (delta !== 1) {
+        this.continuityBreaks++;
+        this.lastBreak = {
+          type: delta === 0 ? "REPEAT" : delta > 1 ? "JUMP" : "REWIND",
+          delta,
+          from: this._prevFrameTc,
+          to: tcString(frame),
+          t: frame.t,
+        };
+      }
+    }
+    this._prevFrameNumber = current;
+    this._prevFrameTc = tcString(frame);
   }
 
   _pickWinner() {
@@ -236,6 +317,45 @@ export class MultiRateDecoder {
     return null;
   }
 
+  // Dropout rate over a rolling window: percentage of expected frames that
+  // weren't successfully decoded. Useful for distinguishing occasional
+  // dropouts (low %) from serious signal-integrity problems (high %).
+  //   0%      → every expected frame decoded; clean signal
+  //   1–10%   → occasional dropouts (analog tape head wear, low-level noise)
+  //   10–50%  → frequent dropouts; signal degraded but still locked
+  //   >50%    → severe / barely decoding; near loss-of-lock
+  //   100%    → no decodes in window (no signal or wrong rate)
+  // Returns null until we have an actualFps estimate and some decode history.
+  dropoutPct(windowSec = 2) {
+    const winner = this.winner;
+    if (!winner) return null;
+    const dec = winner.dec;
+    const times = dec.recentDecodeTimes;
+    if (!times || times.length === 0) return null;
+    const fps = winner.fps;
+    // Use the detected (possibly fractional) rate for the expected count.
+    const lf = dec.lastFrame;
+    let isFractional;
+    if (lf?.dropFrame && (fps === 30 || fps === 60)) isFractional = true;
+    else if (fps === 25 || fps === 50) isFractional = false;
+    else {
+      const expectedAtInteger = 79 * dec.samplesPerBit;
+      const measured = this.medianFrameSpan();
+      isFractional = measured != null && (measured / expectedAtInteger) >= 1.0005;
+    }
+    const actualFps = fps / (isFractional ? 1.001 : 1);
+    const now = performance.now();
+    const cutoff = now - windowSec * 1000;
+    let count = 0;
+    for (let i = times.length - 1; i >= 0; i--) {
+      if (times[i] >= cutoff) count++;
+      else break; // recentDecodeTimes is appended in chronological order
+    }
+    const expected = windowSec * actualFps;
+    if (expected <= 0) return null;
+    return Math.max(0, Math.min(100, 100 * (1 - count / expected)));
+  }
+
   // Clock drift in parts-per-million between the measured frame period and
   // the exact expected period for the detected SMPTE rate (integer or
   // 1.001-divided NTSC). Useful as a "chase" / sync indicator:
@@ -243,34 +363,44 @@ export class MultiRateDecoder {
   //   • ±tens   → analog tape transport drift / minor varispeed
   //   • hundreds+ → source not matching either standard rate; likely
   //                 freewheeling or a non-standard generator
-  // Requires medianFrameSpan() to have stabilised (≥10 decoded frames).
+  //
+  // The measured period uses the MEAN of recentFrameSpans, not the median.
+  // Per-frame span is measured at integer sample resolution, but real LTC
+  // frame periods are usually non-integer in samples (e.g. 29.97 fps at 48k
+  // is 1581.58 samples per 79-bit span). The median snaps to the nearest
+  // integer sample, producing several-hundred-ppm bias; the mean recovers
+  // sub-sample precision by averaging across the natural integer jitter.
   driftPpm() {
     const winner = this.winner;
     if (!winner) return null;
-    const measured = this.medianFrameSpan();
-    if (measured == null) return null;
     const dec = winner.dec;
+    const spans = dec.recentFrameSpans;
+    if (!spans || spans.length < 10) return null;
     const fps = winner.fps;
     const lf = dec.lastFrame;
-    // Same fractional/integer classification as detectedRateKey().
+    // Classification uses the median (robust to outliers) — same as
+    // detectedRateKey() so the two stay consistent.
     let isFractional;
     if (lf?.dropFrame && (fps === 30 || fps === 60)) {
       isFractional = true;
     } else if (fps === 25 || fps === 50) {
       isFractional = false;
     } else {
+      const median = this.medianFrameSpan();
       const expectedAtInteger = 79 * dec.samplesPerBit;
-      isFractional = (measured / expectedAtInteger) >= 1.0005;
+      isFractional = median != null && (median / expectedAtInteger) >= 1.0005;
     }
+    let sum = 0;
+    for (let i = 0; i < spans.length; i++) sum += spans[i];
+    const meanSpan = sum / spans.length;
     const expected = 79 * dec.samplesPerBit * (isFractional ? 1.001 : 1.0);
-    return (measured - expected) / expected * 1e6;
+    return (meanSpan - expected) / expected * 1e6;
   }
 }
 
 export function rateKeyToNominalFps(rateKey) {
   if (rateKey === "59.94df" || rateKey === "59.94" || rateKey === "60") return 60;
   if (rateKey === "50") return 50;
-  if (rateKey === "47.95" || rateKey === "48") return 48;
   if (rateKey === "29.97df" || rateKey === "29.97" || rateKey === "30") return 30;
   if (rateKey === "25") return 25;
   return 24; // 23.976, 24

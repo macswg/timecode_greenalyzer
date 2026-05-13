@@ -3,7 +3,7 @@ import { Publisher } from "./publisher";
 import { MultiRateDecoder, rateKeyToNominalFps } from "./ltcDecoder";
 
 // ─── SMPTE Timecode Spec Constants ──────────────────────────────────────────
-// Per SMPTE ST 12-1:2014 and ST 12-2:2014
+// Per SMPTE ST 12-1:2014
 const SMPTE_RATES = {
   "23.976": { fps: 24000 / 1001, dropFrame: false, label: "23.976 ND" },
   "24":     { fps: 24,           dropFrame: false, label: "24 ND" },
@@ -11,8 +11,6 @@ const SMPTE_RATES = {
   "29.97df":{ fps: 30000 / 1001, dropFrame: true,  label: "29.97 DF" },
   "29.97":  { fps: 30000 / 1001, dropFrame: false, label: "29.97 ND" },
   "30":     { fps: 30,           dropFrame: false, label: "30 ND" },
-  "47.95":  { fps: 48000 / 1001, dropFrame: false, label: "47.95 ND" },
-  "48":     { fps: 48,           dropFrame: false, label: "48 ND" },
   "50":     { fps: 50,           dropFrame: false, label: "50 ND" },
   "59.94df":{ fps: 60000 / 1001, dropFrame: true,  label: "59.94 DF" },
   "59.94":  { fps: 60000 / 1001, dropFrame: false, label: "59.94 ND" },
@@ -497,8 +495,6 @@ function SpecRefPanel() {
     }}>
       <div style={{ color:"#ff9900", letterSpacing:2, fontSize:13, marginBottom:8 }}>SMPTE SPEC REFERENCE</div>
       <div>ST 12-1:2014 — Linear Timecode (LTC)</div>
-      <div>ST 12-2:2014 — Timecode for 1125-Line HDTV</div>
-      <div>ST 2059 — Sync of IP Media Transport</div>
       <div style={{ marginTop:6, color:"#333" }}>LEVEL THRESHOLDS (digital):</div>
       <div>Nominal ........... {LEVEL_SPEC.NOMINAL} dBFS</div>
       <div>Hot (error risk) .. {LEVEL_SPEC.HOT_THRESHOLD} dBFS</div>
@@ -557,6 +553,41 @@ function SpecRefPanel() {
         <br/><span style={{color:"#777"}}>Status thresholds:</span>{" "}
         &lt;5 ppm SOLID green, 5–50 DRIFTING orange, &gt;50 OFF-RATE red.
       </div>
+      <div style={{ marginTop:12, color:"#ff9900", letterSpacing:2, fontSize:13 }}>DROPOUT RATE (%)</div>
+      <div style={{ color:"#555" }}>
+        Percentage of expected frames that weren't successfully decoded over a
+        rolling 2-second window:
+        100 × (1 − decoded_frames / (window_sec × detected_fps)).
+        Distinguishes a clean signal from one with occasional or serious
+        dropouts. EMA-smoothed.
+        <br/><span style={{color:"#777"}}>Expected for LTC:</span>{" "}
+        clean digital source &lt; 1% (every frame decoded),
+        analog tape with minor head wear 1–5%,
+        worn / damaged tape 5–20%,
+        signal severely degraded &gt; 50%,
+        no signal in window = 100%.
+        <br/><span style={{color:"#777"}}>Status thresholds:</span>{" "}
+        &lt;1% CLEAN green, 1–10% OCCASIONAL orange, 10–50% FREQUENT amber,
+        &gt;50% SEVERE red.
+      </div>
+      <div style={{ marginTop:12, color:"#ff9900", letterSpacing:2, fontSize:13 }}>CONTINUITY</div>
+      <div style={{ color:"#555" }}>
+        Consecutive in-order LTC frames must differ by exactly one frame
+        (with drop-frame rules applied at minute boundaries per ST 12-1 §7).
+        Anything else is a continuity break:
+        <br/><span style={{color:"#777"}}>REPEAT</span> — same frame
+        decoded twice (delta = 0). Typically from a freeze-frame in source
+        playback.
+        <br/><span style={{color:"#777"}}>JUMP</span> — TC advanced by more
+        than one frame (delta &gt; 1). From edit splices, dropouts, or skips.
+        <br/><span style={{color:"#777"}}>REWIND</span> — TC went backwards
+        (delta &lt; 0). From player rewinds, freewheel resets, or non-
+        monotonic generators.
+        <br/>The break counter persists until lock is lost for ≥500 ms; gaps
+        from temporary signal loss do not count. Each break is also written
+        to the session log and broadcast over the API publisher as a
+        `continuity` message.
+      </div>
     </div>
   );
 }
@@ -585,6 +616,7 @@ export default function SMPTEAnalyzer() {
   const rafRef = useRef(null);
   const peakDecayRef = useRef(-60);
   const lastErrSigRef = useRef("");
+  const lastBreakTRef = useRef(0);
   const sessionStartRef = useRef(Date.now());
   const publisherRef = useRef(null);
   const tickRef = useRef(null);
@@ -595,7 +627,7 @@ export default function SMPTEAnalyzer() {
   // EMA state for the displayed SNR / THD / noise-floor gauges. The raw FFT
   // measurement is left untouched so the underlying math stays honest; only
   // the gauge readouts are smoothed to keep them legible.
-  const smoothedMetricsRef = useRef({ snr: null, thd: null, noiseFloor: null, driftPpm: null });
+  const smoothedMetricsRef = useRef({ snr: null, thd: null, noiseFloor: null, driftPpm: null, dropoutPct: null });
 
   const [apiUrl, setApiUrl] = useState("ws://localhost:8765/ingest");
   const [apiEnabled, setApiEnabled] = useState(false);
@@ -674,16 +706,19 @@ export default function SMPTEAnalyzer() {
         sm.thd = smooth(sm.thd, Number.isFinite(m?.thd) ? m.thd : null);
         sm.noiseFloor = smooth(sm.noiseFloor, m?.noiseFloor ?? null);
         sm.driftPpm = smooth(sm.driftPpm, dec?.driftPpm() ?? null);
+        sm.dropoutPct = smooth(sm.dropoutPct, dec?.dropoutPct() ?? null);
         data.snr = sm.snr;
         data.noiseFloor = sm.noiseFloor;
         data.thd = sm.thd;
         data.driftPpm = sm.driftPpm;
+        data.dropoutPct = sm.dropoutPct;
       } else {
         data.snr = null;
         data.thd = null;
         data.noiseFloor = null;
         data.driftPpm = null;
-        smoothedMetricsRef.current = { snr: null, thd: null, noiseFloor: null, driftPpm: null };
+        data.dropoutPct = null;
+        smoothedMetricsRef.current = { snr: null, thd: null, noiseFloor: null, driftPpm: null, dropoutPct: null };
       }
       // Real peak from the time-domain buffer (overrides the sim's jittered fake).
       data.peakDbFS = realPeakDb;
@@ -705,6 +740,8 @@ export default function SMPTEAnalyzer() {
       data.bitErrors = dec?.bitErrors ?? 0;
       data.lastFrameBits = dec?.lastFrameBits ?? null;
       data.candidateStatus = dec?.candidateStatus() ?? null;
+      data.continuityBreaks = dec?.continuityBreaks ?? 0;
+      data.lastBreak = dec?.lastBreak ?? null;
       data.rateKey = effectiveRate;
 
       // Re-derive the error tag list from real measurements only. The sim's
@@ -745,6 +782,27 @@ export default function SMPTEAnalyzer() {
       });
     }
     lastErrSigRef.current = sig;
+
+    // Log and publish continuity breaks as they happen.
+    const lb = data.lastBreak;
+    if (lb && lb.t !== lastBreakTRef.current) {
+      lastBreakTRef.current = lb.t;
+      pushLog({
+        t: Date.now(),
+        tc: lb.to,
+        rate: rateKey,
+        errors: [`TC_${lb.type}`, `${lb.delta > 0 ? "+" : ""}${lb.delta}`],
+        levelDbFS: +lvl.toFixed(2),
+        source: useRealAudio ? "live" : "sim",
+      });
+      if (publisherRef.current) {
+        publisherRef.current.send({
+          type: "continuity", t: Date.now(),
+          breakType: lb.type, delta: lb.delta,
+          from: lb.from, to: lb.to, rate: rateKey,
+        });
+      }
+    }
 
     if (publisherRef.current) {
       publisherRef.current.send({
@@ -1122,7 +1180,7 @@ export default function SMPTEAnalyzer() {
             textShadow:"0 0 20px rgba(0,255,136,0.3)",
           }}>SMPTE TIMECODE ANALYZER</div>
           <div style={{ fontSize:11, color:"#333", letterSpacing:3, marginTop:2 }}>
-            ST 12-1:2014 / ST 12-2:2014 COMPLIANT · LTC / VITC
+            ST 12-1:2014 COMPLIANT · LTC
           </div>
         </div>
         <div style={{ textAlign:"right" }}>
@@ -1159,8 +1217,8 @@ export default function SMPTEAnalyzer() {
       {!bootstrapping && liveMode && (
         <div style={{
           fontSize:12, fontFamily:"monospace", letterSpacing:4,
-          color: ltcLocked ? "#22d3ee" : "#888",
-          textShadow: ltcLocked ? "0 0 8px rgba(34,211,238,0.5)" : "none",
+          color: ltcLocked ? "#00ff88" : "#888",
+          textShadow: ltcLocked ? "0 0 8px rgba(0,255,136,0.5)" : "none",
           marginBottom:6,
         }}>
           {ltcLocked
@@ -1480,7 +1538,7 @@ export default function SMPTEAnalyzer() {
                 {analysis?.detectedRateKey ? SMPTE_RATES[analysis.detectedRateKey].label : "— detecting —"}
               </span>
               <span style={{ color:"#555", letterSpacing:2 }}>LOCK STATE</span>
-              <span style={{ color: ltcLocked ? "#22d3ee" : "#888" }}>
+              <span style={{ color: ltcLocked ? "#00ff88" : "#888" }}>
                 {ltcLocked ? "● LOCKED" : "○ NO SIGNAL"}
               </span>
               <span style={{ color:"#555", letterSpacing:2 }}>FRAMES DECODED</span>
@@ -1511,6 +1569,42 @@ export default function SMPTEAnalyzer() {
                 return (
                   <span style={{ color }}>
                     {sign}{abs.toFixed(1)} ppm · {status}
+                  </span>
+                );
+              })()}
+              <span style={{ color:"#555", letterSpacing:2 }}>DROPOUT RATE</span>
+              {(() => {
+                const p = analysis?.dropoutPct;
+                if (!Number.isFinite(p)) {
+                  return <span style={{ color:"#666" }}>—</span>;
+                }
+                // 2-second rolling window. Clean < 1%, occasional 1–10%,
+                // serious 10–50%, severe > 50%.
+                const color = p < 1 ? "#00ff88" : p < 10 ? "#ffaa00" : p < 50 ? "#ff6600" : "#ff3b3b";
+                const status = p < 1 ? "CLEAN" : p < 10 ? "OCCASIONAL" : p < 50 ? "FREQUENT" : "SEVERE";
+                return (
+                  <span style={{ color }}>
+                    {p.toFixed(1)}% · {status}
+                  </span>
+                );
+              })()}
+              <span style={{ color:"#555", letterSpacing:2 }}>CONTINUITY</span>
+              {(() => {
+                const breaks = analysis?.continuityBreaks ?? 0;
+                const last = analysis?.lastBreak;
+                if (!ltcLocked) {
+                  return <span style={{ color:"#666" }}>—</span>;
+                }
+                if (breaks === 0) {
+                  return <span style={{ color:"#00ff88" }}>● CONTINUOUS · 0 BREAKS</span>;
+                }
+                const sign = last?.delta > 0 ? "+" : "";
+                const detail = last
+                  ? ` · last: ${last.type}${last.delta != null ? ` ${sign}${last.delta}` : ""} @ ${last.to}`
+                  : "";
+                return (
+                  <span style={{ color:"#ffaa00" }}>
+                    {breaks} BREAK{breaks === 1 ? "" : "S"}{detail}
                   </span>
                 );
               })()}
