@@ -12,25 +12,32 @@ const SYNC = [0,0,1,1,1,1,1,1,1,1,1,1,1,1,0,1];
 export class LtcDecoder {
   constructor() {
     this.bitBuf = [];
+    this.bitSampleIdx = [];         // sample index at which each bit in bitBuf was emitted
     this.lastTransitionSample = 0;
     this.sampleIndex = 0;
     this.lastSign = 0;
     this.pendingShort = false;
     this.lastFrame = null;          // { hh, mm, ss, ff, dropFrame, colorFrame, t }
+    this.lastFrameBits = null;      // Uint8Array(80) — the actual bits of the most recent decoded frame
     this.framesDecoded = 0;
     this.bitErrors = 0;
     this.lastBitTime = 0;
+    this.samplesPerBit = 0;         // set on first feed()
+    this.recentFrameSpans = [];     // rolling window of actual sample spans for the last decoded frames
   }
 
   feed(samples, sampleRate, nominalFps) {
-    const samplesPerBit = sampleRate / (nominalFps * 80);
+    this.samplesPerBit = sampleRate / (nominalFps * 80);
+    const samplesPerBit = this.samplesPerBit;
     const halfBit = samplesPerBit / 2;
-    // Tight bounds (~±25%) keep wrong-rate decoders from cross-locking on a
-    // correct-rate signal — they pick up bit errors instead.
-    const shortMin = halfBit * 0.75;
-    const shortMax = halfBit * 1.25;
-    const longMin  = samplesPerBit * 0.75;
-    const longMax  = samplesPerBit * 1.25;
+    // ±15% per-interval tolerance prevents 24/25 fps decoders from accepting
+    // 30 fps intervals (which differ by ~25%), but is still loose enough for
+    // the typical 1-2% clock drift of real LTC sources. 24 vs 25 fps cross-
+    // locks (only 4% apart) are caught downstream by the frame-span check.
+    const shortMin = halfBit * 0.85;
+    const shortMax = halfBit * 1.15;
+    const longMin  = samplesPerBit * 0.85;
+    const longMax  = samplesPerBit * 1.15;
 
     for (let i = 0; i < samples.length; i++) {
       const s = samples[i];
@@ -66,15 +73,19 @@ export class LtcDecoder {
 
   _pushBit(b) {
     this.bitBuf.push(b);
+    this.bitSampleIdx.push(this.sampleIndex);
     this.lastBitTime = performance.now();
     if (this.bitBuf.length > 200) {
-      this.bitBuf.splice(0, this.bitBuf.length - 200);
+      const drop = this.bitBuf.length - 200;
+      this.bitBuf.splice(0, drop);
+      this.bitSampleIdx.splice(0, drop);
     }
     this._tryDecode();
   }
 
   _tryDecode() {
     const buf = this.bitBuf;
+    const idx = this.bitSampleIdx;
     const n = buf.length;
     if (n < 80) return;
     // The sync word occupies the LAST 16 bits of each frame. If the tail
@@ -82,14 +93,29 @@ export class LtcDecoder {
     for (let i = 0; i < 16; i++) {
       if (buf[n - 16 + i] !== SYNC[i]) return;
     }
+    // Frame-span sanity check: the 80 bits must have arrived in roughly the
+    // expected number of samples. This separates 24 vs 25 fps cross-locks
+    // (≈4% apart) that per-interval tolerance alone can't catch. ±3% allows
+    // for real-world LTC clock drift while rejecting wrong-rate decodes.
+    // Note: idx[i] records the sample where bit i was *emitted* (i.e., its
+    // closing transition), so the distance from idx[n-80] to idx[n-1] spans
+    // 79 bit durations, not 80.
+    const frameSamples = idx[n - 1] - idx[n - 80];
+    const expectedFrameSamples = 79 * this.samplesPerBit;
+    const spanError = Math.abs(frameSamples - expectedFrameSamples) / expectedFrameSamples;
+    if (spanError > 0.03) return;
     const f = buf.slice(n - 80);
     const parsed = parseFrame(f);
     if (parsed) {
       this.lastFrame = { ...parsed, t: performance.now() };
+      this.lastFrameBits = Uint8Array.from(f);
       this.framesDecoded++;
+      this.recentFrameSpans.push(frameSamples);
+      if (this.recentFrameSpans.length > 30) this.recentFrameSpans.shift();
       // Keep just the sync word so we don't re-decode the same frame; the
       // next frame's bits will accumulate after it.
       this.bitBuf = buf.slice(n - 16);
+      this.bitSampleIdx = idx.slice(n - 16);
     }
   }
 
@@ -150,22 +176,63 @@ export class MultiRateDecoder {
   get winner() { return this.winnerIdx >= 0 ? this.decoders[this.winnerIdx] : null; }
 
   get lastFrame() { return this.winner?.dec.lastFrame ?? null; }
+  get lastFrameBits() { return this.winner?.dec.lastFrameBits ?? null; }
   get framesDecoded() { return this.winner?.dec.framesDecoded ?? 0; }
-  get bitErrors() { return this.decoders.reduce((s, d) => s + d.dec.bitErrors, 0); }
+  get bitErrors() { return this.winner?.dec.bitErrors ?? 0; }
   get nominalFps() { return this.winner?.fps ?? null; }
 
-  // Map decoded fps + dropFrame flag to the closest standard SMPTE rate key.
-  // We can't distinguish 23.976 from 24 or 29.97-NDF from 30 from a few
-  // frames alone, so the dropFrame flag is our only NDF/DF disambiguator.
+  // Per-candidate status, for the rate-detection UI. Returns one entry per
+  // candidate fps with real counters from that decoder instance.
+  candidateStatus() {
+    const now = performance.now();
+    return this.decoders.map(({ fps, dec }) => ({
+      fps,
+      framesDecoded: dec.framesDecoded,
+      bitErrors: dec.bitErrors,
+      ageMs: dec.lastFrame ? now - dec.lastFrame.t : Infinity,
+      locked: dec.lastFrame && (now - dec.lastFrame.t < 500),
+    }));
+  }
+
+  // Median observed frame span (in samples) for the winning decoder. Used to
+  // distinguish 1.001-divided fractional rates (29.97 NDF, 23.976, 59.94 NDF)
+  // from their integer counterparts (30, 24, 60). At least 10 decoded frames
+  // are needed before this returns a value to filter out per-frame jitter.
+  medianFrameSpan() {
+    const spans = this.winner?.dec.recentFrameSpans;
+    if (!spans || spans.length < 10) return null;
+    const sorted = [...spans].sort((a, b) => a - b);
+    return sorted[Math.floor(sorted.length / 2)];
+  }
+
+  // Map decoded fps + dropFrame flag + measured frame span to a SMPTE rate
+  // key. The dropFrame flag distinguishes the DF variants outright. For NDF
+  // signals we measure whether the actual frame span is closer to the
+  // integer rate or to the 1.001-divided fractional rate (NTSC family).
   detectedRateKey() {
     const lf = this.lastFrame;
     if (!lf) return null;
     const fps = this.nominalFps;
-    if (fps === 24) return "24";
+    if (lf.dropFrame) {
+      if (fps === 30) return "29.97df";
+      if (fps === 60) return "59.94df";
+    }
+    // NDF: decide integer vs fractional by frame-span ratio. The 30-fps
+    // decoder expects 80 × samplesPerBit samples per frame; an actual 29.97
+    // signal arrives 0.1% longer (×1.001). Threshold at the midpoint
+    // (×1.0005) so even a 1-sample drift over 30+ samples leans correctly.
+    if (fps === 24 || fps === 30 || fps === 60) {
+      const winner = this.winner;
+      // 79 bit durations between idx[n-80] and idx[n-1] — see _tryDecode.
+      const expected = 79 * winner.dec.samplesPerBit;
+      const measured = this.medianFrameSpan();
+      const isFractional = measured != null && (measured / expected) >= 1.0005;
+      if (fps === 24) return isFractional ? "23.976" : "24";
+      if (fps === 30) return isFractional ? "29.97" : "30";
+      if (fps === 60) return isFractional ? "59.94" : "60";
+    }
     if (fps === 25) return "25";
-    if (fps === 30) return lf.dropFrame ? "29.97df" : "30";
     if (fps === 50) return "50";
-    if (fps === 60) return lf.dropFrame ? "59.94df" : "60";
     return null;
   }
 }
