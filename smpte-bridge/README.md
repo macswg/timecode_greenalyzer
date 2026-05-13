@@ -30,6 +30,11 @@ Listens on `:8765` by default (`PORT=9000 npm start` to override).
   Both rate fields are always present and explicit.
 - `{"type":"error", t, seq, tc, rate, errors}` emitted once per error-set transition.
   `tc` is a formatted timecode string; `;` is used as the frame separator for drop-frame.
+- `{"type":"continuity", t, seq, breakType, delta, from, to, rate}` emitted when
+  a continuity break is detected. `breakType` is `"REPEAT"` (freeze frame, delta = 0),
+  `"JUMP"` (edit splice / dropout, delta > 1), or `"REWIND"` (backwards, delta < 0).
+  `from` and `to` are formatted timecode strings. Gaps ≥ 500 ms between decoded frames
+  reset continuity tracking and do not produce this message.
 - `{"type":"status", t, subscribers, publisher}` heartbeat on connection
   state changes.
 - `{"type":"hello", t, lastTc}` sent to each new subscriber on connect.

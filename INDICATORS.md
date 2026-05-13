@@ -50,8 +50,8 @@ hide; they show their dim state so the layout stays stable.
 
 - `○ STARTING — requesting audio input…` — shown during the bootstrap
   window between page load and the first resolved `getUserMedia` result.
-- `● LTC LOCKED · N FRAMES DECODED` — live, locked. `N` is the cumulative
-  frame count from the winning decoder.
+- `● LTC LOCKED · N FRAMES DECODED` — live, locked. Green (`#00ff88`). `N`
+  is the cumulative frame count from the winning decoder.
 - `○ NO LTC SIGNAL — feed valid LTC into the selected input` — live, no
   fresh decode. Either no signal or wrong rate / level.
 - `▲ SIMULATING CODE` — simulation mode (fuchsia, blinking, with matching
@@ -156,12 +156,14 @@ sim's purpose.
 | Row | Source |
 |---|---|
 | **DETECTED RATE** | `MultiRateDecoder.detectedRateKey()`, formatted via `SMPTE_RATES[key].label` |
-| **LOCK STATE** | `● LOCKED` / `○ NO SIGNAL` from `ltcLocked` |
+| **LOCK STATE** | `● LOCKED` (green `#00ff88`) / `○ NO SIGNAL` from `ltcLocked` |
 | **FRAMES DECODED** | `MultiRateDecoder.framesDecoded` |
 | **BIT ERRORS** | `MultiRateDecoder.bitErrors` |
 | **INPUT LEVEL** | Shows `—` — `analysis.rmsDbFS` is not populated in the live path; the meters in SIGNAL LEVEL are the source of truth |
 | **SAMPLE RATE** | `audioContext.sampleRate` (Hz) for live mic input. When a file is playing: `{fileNativeRate} Hz file · {ctx.sampleRate} Hz decoded` — the native rate is parsed from the WAV RIFF header by `readWavSampleRate()`; non-WAV files show only the decoded rate |
 | **CLOCK DRIFT** | `MultiRateDecoder.driftPpm()`, EMA-smoothed. Deviation of measured frame period from exact expected SMPTE rate, in ppm. `—` until 10 decoded frames. States: `SOLID` (<5 ppm, green) · `DRIFTING` (5–50 ppm, orange) · `OFF-RATE` (>50 ppm, red) |
+| **DROPOUT RATE** | `MultiRateDecoder.dropoutPct(2)`, EMA-smoothed. Percentage of expected frames not decoded over a rolling 2-second window: `100 × (1 − decoded / (window_sec × detected_fps))`. `—` until the winner is established. States: `CLEAN` (<1%, green) · `OCCASIONAL` (1–10%, orange) · `FREQUENT` (10–50%, amber) · `SEVERE` (>50%, red) |
+| **CONTINUITY** | Count of frames where `HH:MM:SS:FF` did not advance by exactly one frame (drop-frame rules applied). `—` when not locked. Green `● CONTINUOUS · 0 BREAKS` when clean. Amber `N BREAKS · last: TYPE ±Δ @ HH:MM:SS:FF` otherwise. Break types — `REPEAT` (delta = 0, freeze frame), `JUMP` (delta > 1, edit splice / dropout), `REWIND` (delta < 0, rewind / freewheel reset). Gaps ≥ 500 ms between decoded frames reset continuity tracking rather than producing a spurious JUMP. |
 
 ---
 

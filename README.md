@@ -1,6 +1,8 @@
 # SMPTE Timecode Analyzer
 
-A browser-based Linear Timecode (LTC) analyzer built to the SMPTE ST 12-1:2014 and ST 12-2:2014 specifications. It decodes and displays timecode from a live audio input, detects frame rate and drop-frame mode automatically, measures signal level, and flags error conditions including clipping, low level, noise, and dropout.
+A browser-based Linear Timecode (LTC) analyzer built to the SMPTE ST 12-1:2014 specification. It decodes and displays timecode from a live audio input, detects frame rate and drop-frame mode automatically, measures signal level, and flags error conditions including clipping, low level, noise, and dropout.
+
+This tool reads **LTC only**. VITC (vertical interval timecode) and ATC (ancillary timecode embedded in SDI/HDMI) carry timecode in video, not audio, and cannot be analyzed here.
 
 For a full list of every on-screen indicator and where its value comes from, see [`INDICATORS.md`](INDICATORS.md).
 
@@ -67,8 +69,6 @@ To connect the analyzer to the bridge, enter the WebSocket URL (`ws://localhost:
 | Standard | Title |
 |---|---|
 | SMPTE ST 12-1:2014 | Time and Control Code — Part 1: Linear Timecode (LTC) |
-| SMPTE ST 12-2:2014 | Time and Control Code — Part 2: ATC for HDTV Systems |
-| SMPTE ST 2059 | Synchronization of IP Media Transport (informational reference) |
 
 ---
 
@@ -93,7 +93,7 @@ Three status flags appear alongside the display:
 
 ### Frame Rate Detection
 
-The analyzer detects all frame rates defined in SMPTE ST 12-1 and ST 12-2:
+The analyzer detects all frame rates defined in SMPTE ST 12-1:
 
 | Rate Key | Label | fps (exact) | Drop Frame |
 |---|---|---|---|
@@ -103,8 +103,6 @@ The analyzer detects all frame rates defined in SMPTE ST 12-1 and ST 12-2:
 | 29.97df | 29.97 DF | 30000/1001 | Yes |
 | 29.97 | 29.97 ND | 30000/1001 | No |
 | 30 | 30 ND | 30 | No |
-| 47.95 | 47.95 ND | 48000/1001 | No |
-| 48 | 48 ND | 48 | No |
 | 50 | 50 ND | 50 | No |
 | 59.94df | 59.94 DF | 60000/1001 | Yes |
 | 59.94 | 59.94 ND | 60000/1001 | No |
@@ -205,6 +203,33 @@ The analyzer measures and displays:
 
 ---
 
+### Continuity Detection
+
+The analyzer checks that every decoded frame advances the timecode by exactly one frame (applying drop-frame rules at minute boundaries). Any deviation is a continuity break:
+
+| Type | Delta | Cause |
+|---|---|---|
+| REPEAT | 0 | Same frame decoded twice — freeze frame in source playback |
+| JUMP | > 1 | TC advanced by more than one frame — edit splice, dropout, or skip |
+| REWIND | < 0 | TC went backwards — player rewind, freewheel reset, or non-monotonic generator |
+
+The break count and the most recent break detail are shown in the LIVE INPUT STATUS panel. Gaps of 500 ms or more between decoded frames reset continuity tracking rather than producing a spurious JUMP. Each break is also written to the session log and published over the API as a `{type:"continuity"}` message.
+
+---
+
+### Dropout Rate
+
+A rolling 2-second window counts how many LTC frames were successfully decoded versus how many were expected at the detected rate. The percentage of missed frames is displayed in the LIVE INPUT STATUS panel.
+
+| Status | Dropout % | Typical cause |
+|---|---|---|
+| CLEAN | < 1% | Every frame decoded; clean signal |
+| OCCASIONAL | 1–10% | Minor head wear, marginal level |
+| FREQUENT | 10–50% | Signal degraded but locked |
+| SEVERE | > 50% | Near loss-of-lock |
+
+---
+
 ### Error Detection
 
 Five error conditions are monitored and displayed as illuminated badges:
@@ -281,7 +306,7 @@ The timecode card gets a fuchsia outline and a blinking **SIMULATING CODE** indi
 
 The app can publish timecode frames to the `smpte-bridge` sidecar over WebSocket. Enter the bridge URL in the **API PUBLISHER** section and click **PUBLISH**. The publisher reconnects automatically with exponential back-off if the bridge is not running.
 
-Every tick emits a `{type:"tc"}` message. Each error-state transition emits a `{type:"error"}` message. See `smpte-bridge/README.md` for the full schema.
+Every tick emits a `{type:"tc"}` message. Each error-state transition emits a `{type:"error"}` message. Each continuity break emits a `{type:"continuity"}` message. See `smpte-bridge/README.md` for the full schema.
 
 ---
 
@@ -292,3 +317,4 @@ Every tick emits a `{type:"tc"}` message. Each error-state transition emits a `{
 | 1.0 | 2026-05-12 | Initial release — LTC display, rate detection, level analysis, error flagging, simulation mode, live audio level measurement |
 | 1.1 | 2026-05-12 | Live biphase decode wired (MultiRateDecoder + AudioWorklet); auto rate detection; device picker; API publisher; session log; Web Worker tick |
 | 1.2 | 2026-05-12 | File-drop analysis path; `wireSourceToDecoder()` shared between mic and file paths; WAV native rate display; real SNR/THD/noise-floor via `computeLtcSpectralMetrics()`; EMA smoothing on gauges; clock drift/chase indicator; fractional rate detection (29.97 NDF / 23.976 / 59.94 NDF); frame-span sanity check; biphase tolerance tightened ±25% → ±15%; rate label color-coded (DF orange / NDF blue); B612 Mono timecode font; mobile responsive CSS; NOISE error tag removed from live mode |
+| 1.3 | 2026-05-12 | Continuity detection (REPEAT / JUMP / REWIND break types, per-frame queue drain, 500 ms gap reset); dropout rate (2-second rolling window, CLEAN / OCCASIONAL / FREQUENT / SEVERE); drift uses mean of recentFrameSpans (not median) for sub-sample precision; recentFrameSpans cap raised 30 → 120 frames; lock indicator and LOCKED banner changed from cyan to green (`#00ff88`); 47.95 and 48 fps removed from SMPTE_RATES; ST 12-2 references removed; app header updated to `ST 12-1:2014 COMPLIANT · LTC`; file status label changed to `ANALYSIS ONLY · NO OUTPUT`; `{type:"continuity"}` API publisher message |
