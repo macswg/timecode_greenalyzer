@@ -30,6 +30,13 @@ export class LtcDecoder {
 
   feed(samples, sampleRate, nominalFps) {
     this.samplesPerBit = sampleRate / (nominalFps * 80);
+    // If we haven't decoded a frame in over a minute, the accumulated
+    // bit-error count is stale — it was racked up against noise transitions
+    // while no LTC was present. Clear it so a returning signal isn't
+    // unfairly penalised in the FRAME INTEGRITY readout.
+    if (this.bitErrors > 0 && this.lastFrame && performance.now() - this.lastFrame.t > 60000) {
+      this.bitErrors = 0;
+    }
     const samplesPerBit = this.samplesPerBit;
     const halfBit = samplesPerBit / 2;
     // ±15% per-interval tolerance prevents 24/25 fps decoders from accepting
@@ -139,7 +146,7 @@ export class LtcDecoder {
   }
 }
 
-function parseFrame(b) {
+export function parseFrame(b) {
   const frUnits  = b[0]  | (b[1]<<1) | (b[2]<<2) | (b[3]<<3);
   const frTens   = b[8]  | (b[9]<<1);
   const dropFrame = b[10] === 1;
@@ -163,7 +170,7 @@ function parseFrame(b) {
 // `fps` here is the NOMINAL integer rate (24, 25, 30, 50, 60); both NTSC
 // fractional variants (29.97 / 23.976 / 59.94) use the same integer for
 // frame-count math because they just slow the clock, not the count.
-function tcToFrameNumber(hh, mm, ss, ff, fps, dropFrame) {
+export function tcToFrameNumber(hh, mm, ss, ff, fps, dropFrame) {
   if (!dropFrame) {
     return ((hh * 60 + mm) * 60 + ss) * fps + ff;
   }
@@ -173,7 +180,7 @@ function tcToFrameNumber(hh, mm, ss, ff, fps, dropFrame) {
   return ((hh * 60 + mm) * 60 + ss) * fps + ff - dropped;
 }
 
-function tcString(lf) {
+export function tcString(lf) {
   const p = n => String(n).padStart(2, "0");
   return `${p(lf.hh)}:${p(lf.mm)}:${p(lf.ss)}${lf.dropFrame ? ";" : ":"}${p(lf.ff)}`;
 }
