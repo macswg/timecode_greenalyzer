@@ -754,8 +754,15 @@ export default function SMPTEAnalyzer() {
       const live = [];
       if (lvl > LEVEL_SPEC.CLIP_THRESHOLD) live.push("CLIP");
       else if (lvl > LEVEL_SPEC.HOT_THRESHOLD) live.push("HOT");
-      if (lvl < LEVEL_SPEC.LOW_THRESHOLD) live.push("LOW");
-      if (lvl < LEVEL_SPEC.SILENT_THRESHOLD) live.push("DROPOUT");
+      // LOW / DROPOUT both imply "there is (or was) a signal that's now
+      // weak or gone". Suppress them when the input is just idle (silent
+      // device, nothing routed) so switching to e.g. BlackHole doesn't
+      // light up the tags. A signal counts as present if level is above
+      // the silent threshold OR a frame decoded within the last 2 s.
+      const lastDecodeAge = dec?.lastFrame ? performance.now() - dec.lastFrame.t : Infinity;
+      const hasSignal = lvl >= LEVEL_SPEC.SILENT_THRESHOLD || lastDecodeAge < 2000;
+      if (lvl < LEVEL_SPEC.LOW_THRESHOLD && hasSignal) live.push("LOW");
+      if (lvl < LEVEL_SPEC.SILENT_THRESHOLD && lastDecodeAge < 2000) live.push("DROPOUT");
       data.errors = live;
       data.frameValid = fresh && live.length === 0;
     }
@@ -1081,9 +1088,20 @@ export default function SMPTEAnalyzer() {
   // Confidence derives from current state, so it resets to 0 whenever we
   // switch modes (analysis is cleared on switch) and climbs as real decode
   // activity accumulates.
+  // Confidence tracks RECENT decode quality, not cumulative counts. The old
+  // ratio (framesDecoded / (framesDecoded + bitErrors + 1)) took ~60 s to
+  // recover after a rate change on the same device, because stale bit
+  // errors from running the wrong rate dominated the denominator. dropoutPct
+  // is a windowed metric — % of expected frames in the last ~2 s that
+  // didn't decode — so it self-clears within the window.
   const confidence = liveMode
     ? (ltcLocked
-        ? Math.min(99.5, 100 * (analysis.framesDecoded || 0) / ((analysis.framesDecoded || 0) + (analysis.bitErrors || 0) + 1))
+        ? (Number.isFinite(analysis?.dropoutPct)
+            ? Math.max(0, Math.min(99.5, 100 - analysis.dropoutPct))
+            // Pre-window: show a small non-zero value so the bar starts
+            // moving the moment we see the first frame, rather than sitting
+            // at 0 until the window fills.
+            : 25)
         : 0)
     : (analysis ? Math.max(0, 100 - (analysis.errors?.length ?? 0) * 18) : 0);
   const detectorRateKey = liveMode ? (analysis?.detectedRateKey ?? null) : rateKey;
@@ -1592,9 +1610,6 @@ export default function SMPTEAnalyzer() {
               {(() => {
                 const breaks = analysis?.continuityBreaks ?? 0;
                 const last = analysis?.lastBreak;
-                if (!ltcLocked) {
-                  return <span style={{ color:"#666" }}>—</span>;
-                }
                 if (breaks === 0) {
                   return <span style={{ color:"#00ff88" }}>● CONTINUOUS · 0 BREAKS</span>;
                 }
