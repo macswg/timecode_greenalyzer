@@ -72,6 +72,11 @@ function framesToTc(totalFrames, nomFps, dropFrame) {
 }
 
 // ─── Audio Analysis Engine ───────────────────────────────────────────────────
+// The discrete input-channel index the LTC is tapped from. The analyzer only
+// ever looks at one channel; a ChannelSplitter routes this channel to the
+// analyser + worklet at unity, bypassing Web Audio's mono down-mix weighting.
+const LTC_CHANNEL = 0;
+
 function computeRMS(buffer) {
   let sum = 0;
   for (let i = 0; i < buffer.length; i++) sum += buffer[i] * buffer[i];
@@ -636,6 +641,13 @@ export default function SMPTEAnalyzer() {
   const [audioDevices, setAudioDevices] = useState([]);
   const [currentDeviceId, setCurrentDeviceId] = useState(null);
   const [currentDeviceLabel, setCurrentDeviceLabel] = useState("");
+  // How many channels the current input exposes, and which one we tap for LTC.
+  // selectedChannelRef mirrors the state so wireSourceToDecoder (called from
+  // async paths) reads the latest value without a stale closure.
+  const [inputChannelCount, setInputChannelCount] = useState(1);
+  const [selectedChannel, setSelectedChannel] = useState(LTC_CHANNEL);
+  const selectedChannelRef = useRef(LTC_CHANNEL);
+  const splitterRef = useRef(null);
   const streamRef = useRef(null);
   const bufferSourceRef = useRef(null);
   const [playingFile, setPlayingFile] = useState(null); // { name, durationSec, loop }
@@ -902,7 +914,7 @@ export default function SMPTEAnalyzer() {
   // Wires a source node into a fresh analyser + worklet + decoder on the
   // shared AudioContext. Returns the new analyser and worklet so callers
   // can stash them. Used by both the live-mic and file-playback paths.
-  function wireSourceToDecoder(ctx, source) {
+  function wireSourceToDecoder(ctx, source, channelCount) {
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 2048;
     // Defaults are tuned for VU-style visualisation, not measurement:
@@ -916,7 +928,23 @@ export default function SMPTEAnalyzer() {
     analyser.minDecibels = -120;
     analyser.maxDecibels = 0;
     analyser.smoothingTimeConstant = 0;
-    source.connect(analyser);
+    // LTC is always a single channel of timecode. Multichannel devices (e.g.
+    // Dante Virtual Soundcard) hand us 2+ channels with the code on one of
+    // them. Feeding that straight into the analyser/worklet triggers Web
+    // Audio's default "speakers" down-mix to mono — for stereo that's
+    // 0.5×(L+R), which halves a single-channel signal and reads 6.02 dB low
+    // vs. tools that read the discrete channel. A ChannelSplitter sized to the
+    // input lets us tap exactly one channel at unity, with no down-mix
+    // weighting. The tapped channel is user-selectable (selectedChannelRef).
+    const nCh = Math.max(1, channelCount || source.channelCount || 1);
+    const ch = Math.min(Math.max(0, selectedChannelRef.current), nCh - 1);
+    selectedChannelRef.current = ch;
+    setInputChannelCount(nCh);
+    setSelectedChannel(ch);
+    const splitter = ctx.createChannelSplitter(nCh);
+    splitterRef.current = splitter;
+    source.connect(splitter);
+    splitter.connect(analyser, ch);
     // numberOfOutputs:0 makes the worklet a pure sink — process() runs as
     // long as inputs are flowing, and we never touch ctx.destination, so
     // no system output stream is opened.
@@ -924,8 +952,25 @@ export default function SMPTEAnalyzer() {
     const decoder = new MultiRateDecoder();
     decoderRef.current = decoder;
     worklet.port.onmessage = (e) => decoder.feed(e.data, sampleRateRef.current);
-    source.connect(worklet);
+    splitter.connect(worklet, ch);
     return { analyser, worklet };
+  }
+
+  // Re-tap the splitter to a different input channel without rebuilding the
+  // stream/source graph. disconnect() on the splitter drops only its outgoing
+  // edges (to analyser + worklet); the source→splitter edge is untouched.
+  function selectInputChannel(idx) {
+    selectedChannelRef.current = idx;
+    setSelectedChannel(idx);
+    const sp = splitterRef.current;
+    const an = analyserRef.current;
+    const wk = workletNodeRef.current;
+    if (!sp || !an || !wk) return;
+    try { sp.disconnect(); } catch {}
+    sp.connect(an, idx);
+    sp.connect(wk, idx);
+    // The decoder self-heals on the new channel: with no fresh frames it
+    // unlocks after ~200 ms and the windowed metrics decay on their own.
   }
 
   // Tear down whatever source is currently feeding the decoder so a new one
@@ -938,6 +983,7 @@ export default function SMPTEAnalyzer() {
     }
     if (sourceRef.current) { try { sourceRef.current.disconnect(); } catch {} sourceRef.current = null; }
     if (workletNodeRef.current) { try { workletNodeRef.current.disconnect(); } catch {} workletNodeRef.current = null; }
+    if (splitterRef.current) { try { splitterRef.current.disconnect(); } catch {} splitterRef.current = null; }
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(t => t.stop());
       streamRef.current = null;
@@ -952,6 +998,11 @@ export default function SMPTEAnalyzer() {
       const constraints = {
         audio: {
           echoCancellation: false, noiseSuppression: false, autoGainControl: false,
+          // Ask for every channel the device exposes (Chrome clamps to the
+          // device max). Without this, multichannel inputs like Dante Virtual
+          // Soundcard are delivered as a single down-mixed channel and we'd
+          // never see the discrete LTC channel.
+          channelCount: { ideal: 64 },
           ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
         },
       };
@@ -965,7 +1016,7 @@ export default function SMPTEAnalyzer() {
 
       const ctx = await getOrCreateAudioContext();
       const source = ctx.createMediaStreamSource(stream);
-      const { analyser, worklet } = wireSourceToDecoder(ctx, source);
+      const { analyser, worklet } = wireSourceToDecoder(ctx, source, settings.channelCount);
 
       analyserRef.current = analyser;
       sourceRef.current = source;
@@ -1005,7 +1056,7 @@ export default function SMPTEAnalyzer() {
       const source = ctx.createBufferSource();
       source.buffer = audioBuffer;
       source.loop = true;
-      const { analyser, worklet } = wireSourceToDecoder(ctx, source);
+      const { analyser, worklet } = wireSourceToDecoder(ctx, source, audioBuffer.numberOfChannels);
       source.start();
 
       bufferSourceRef.current = source;
@@ -1452,6 +1503,24 @@ export default function SMPTEAnalyzer() {
                     color:"#666", padding:"4px 10px", fontSize:12, letterSpacing:1,
                   }}
                 >↻</button>
+                {inputChannelCount > 1 && (
+                  <>
+                    <div style={{ fontSize:11, color:"#555", letterSpacing:2 }}>CH</div>
+                    <select
+                      value={selectedChannel}
+                      onChange={e => selectInputChannel(Number(e.target.value))}
+                      title="Input channel carrying the LTC"
+                      style={{ fontSize:12 }}
+                    >
+                      {Array.from({ length: inputChannelCount }, (_, i) => (
+                        <option key={i} value={i}>{`CH ${i + 1}`}</option>
+                      ))}
+                    </select>
+                    <span style={{ fontSize:11, color:"#555", letterSpacing:1 }}>
+                      of {inputChannelCount}
+                    </span>
+                  </>
+                )}
                 <div style={{ fontSize:11, color:"#00ff88", fontFamily:"monospace", letterSpacing:2 }}>
                   ● LIVE
                 </div>
