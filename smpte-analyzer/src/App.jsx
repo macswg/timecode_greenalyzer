@@ -546,17 +546,33 @@ function SpecRefPanel() {
         <br/><span style={{color:"#777"}}>Gauge thresholds:</span>{" "}
         ≤50% green, 50–70% orange, &gt;70% red.
       </div>
+      <div style={{ marginTop:12, color:"#ff9900", letterSpacing:2, fontSize:13 }}>SAMPLE RATE</div>
+      <div style={{ color:"#555" }}>
+        Two readings of the input's sample rate.
+        <br/><span style={{color:"#777"}}>nominal</span> — the device's declared
+        rate (browser getSettings().sampleRate, else the audio engine's fixed
+        rate); a reported integer, updates per connected input.
+        <br/><span style={{color:"#777"}}>measured</span> — the true sample-delivery
+        rate, counted from the capture worklet over wall-clock time.
+        <br/>Web Audio resamples the input into one long-lived context, so
+        measured tracks the context clock; a gap between the two usually means
+        the OS is resampling the device, not a fault.
+      </div>
       <div style={{ marginTop:12, color:"#ff9900", letterSpacing:2, fontSize:13 }}>CLOCK DRIFT (ppm)</div>
       <div style={{ color:"#555" }}>
         Deviation of the measured frame period from the exact expected period
         for the detected SMPTE rate (integer or 1.001-divided NTSC), expressed
-        in parts per million. Zero = locked. EMA-smoothed for steadiness.
+        in parts per million. EMA-smoothed for steadiness. It is a steady
+        FREQUENCY OFFSET between the source and our capture clock — it does NOT
+        affect chasing/resolving, which slave to whatever rate arrives and
+        absorb a constant offset of even a few hundred ppm. Chase-ability is
+        governed by DROPOUT RATE and CONTINUITY, not drift.
         <br/><span style={{color:"#777"}}>Expected for LTC:</span>{" "}
-        digital source ≈ 0 ppm (solid),
-        analog tape transport ±5–50 ppm (small drift),
-        free-wheeling generator &gt; 100 ppm (not matching standard rate).
+        digital / genlocked source ≈ 0 ppm,
+        free-running generator ±50–150 ppm (normal, chaseable).
         <br/><span style={{color:"#777"}}>Status thresholds:</span>{" "}
-        &lt;5 ppm SOLID green, 5–50 DRIFTING orange, &gt;50 OFF-RATE red.
+        &lt;5 ppm LOCKED green, 5–500 OFFSET · OK TO CHASE cyan,
+        &gt;500 CHECK RATE amber (large enough to imply a mis-detected rate).
       </div>
       <div style={{ marginTop:12, color:"#ff9900", letterSpacing:2, fontSize:13 }}>DROPOUT RATE (%)</div>
       <div style={{ color:"#555" }}>
@@ -1855,27 +1871,6 @@ export default function SMPTEAnalyzer() {
       {/* SMPTE Spec Reference — bottom of page */}
       <div style={{ marginTop:12 }}>
         <SpecRefPanel />
-      </div>
-
-      {/* Sample-rate readout note */}
-      <div style={{ marginTop:12, fontSize:11, lineHeight:1.6, color:"#555", maxWidth:760 }}>
-        <span style={{ color:"#777", letterSpacing:2 }}>NOTE ON SAMPLE RATE — </span>
-        <b style={{ color:"#888" }}>nominal</b> is the device's declared rate (from the
-        browser's <code style={{ color:"#888" }}>getSettings().sampleRate</code>, falling back to the
-        audio engine's fixed rate); it's a reported integer, not a measurement.
-        {" "}
-        <b style={{ color:"#888" }}>measured</b> is the true sample-delivery rate, counted from the
-        capture worklet over wall-clock time. Because Web Audio resamples the input into a single
-        long-lived context, <i>measured</i> tracks the context clock — so a gap between the two
-        usually means the OS is resampling the device, not a fault.
-        <br /><br />
-        <span style={{ color:"#777", letterSpacing:2 }}>NOTE ON CLOCK DRIFT — </span>
-        drift is a steady <b style={{ color:"#888" }}>frequency offset</b> between the timecode
-        source and this capture clock. It does <b style={{ color:"#888" }}>not</b> affect chasing or
-        resolving — slave devices lock to whatever rate arrives, absorbing a constant offset of
-        even a few hundred ppm. What actually disrupts a chase is shown separately: the
-        {" "}<b style={{ color:"#888" }}>DROPOUT RATE</b> and continuity breaks
-        (JUMP / REPEAT / REWIND). A steady offset reading <i>OK TO CHASE</i> is not a fault to fix.
       </div>
     </div>
   );
