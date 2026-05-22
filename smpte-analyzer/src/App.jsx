@@ -72,6 +72,11 @@ function framesToTc(totalFrames, nomFps, dropFrame) {
 }
 
 // ─── Audio Analysis Engine ───────────────────────────────────────────────────
+// The discrete input-channel index the LTC is tapped from. The analyzer only
+// ever looks at one channel; a ChannelSplitter routes this channel to the
+// analyser + worklet at unity, bypassing Web Audio's mono down-mix weighting.
+const LTC_CHANNEL = 0;
+
 function computeRMS(buffer) {
   let sum = 0;
   for (let i = 0; i < buffer.length; i++) sum += buffer[i] * buffer[i];
@@ -541,17 +546,33 @@ function SpecRefPanel() {
         <br/><span style={{color:"#777"}}>Gauge thresholds:</span>{" "}
         ≤50% green, 50–70% orange, &gt;70% red.
       </div>
+      <div style={{ marginTop:12, color:"#ff9900", letterSpacing:2, fontSize:13 }}>SAMPLE RATE</div>
+      <div style={{ color:"#555" }}>
+        Two readings of the input's sample rate.
+        <br/><span style={{color:"#777"}}>nominal</span> — the device's declared
+        rate (browser getSettings().sampleRate, else the audio engine's fixed
+        rate); a reported integer, updates per connected input.
+        <br/><span style={{color:"#777"}}>measured</span> — the true sample-delivery
+        rate, counted from the capture worklet over wall-clock time.
+        <br/>Web Audio resamples the input into one long-lived context, so
+        measured tracks the context clock; a gap between the two usually means
+        the OS is resampling the device, not a fault.
+      </div>
       <div style={{ marginTop:12, color:"#ff9900", letterSpacing:2, fontSize:13 }}>CLOCK DRIFT (ppm)</div>
       <div style={{ color:"#555" }}>
         Deviation of the measured frame period from the exact expected period
         for the detected SMPTE rate (integer or 1.001-divided NTSC), expressed
-        in parts per million. Zero = locked. EMA-smoothed for steadiness.
+        in parts per million. EMA-smoothed for steadiness. It is a steady
+        FREQUENCY OFFSET between the source and our capture clock — it does NOT
+        affect chasing/resolving, which slave to whatever rate arrives and
+        absorb a constant offset of even a few hundred ppm. Chase-ability is
+        governed by DROPOUT RATE and CONTINUITY, not drift.
         <br/><span style={{color:"#777"}}>Expected for LTC:</span>{" "}
-        digital source ≈ 0 ppm (solid),
-        analog tape transport ±5–50 ppm (small drift),
-        free-wheeling generator &gt; 100 ppm (not matching standard rate).
+        digital / genlocked source ≈ 0 ppm,
+        free-running generator ±50–150 ppm (normal, chaseable).
         <br/><span style={{color:"#777"}}>Status thresholds:</span>{" "}
-        &lt;5 ppm SOLID green, 5–50 DRIFTING orange, &gt;50 OFF-RATE red.
+        &lt;5 ppm LOCKED green, 5–500 OFFSET · OK TO CHASE cyan,
+        &gt;500 CHECK RATE amber (large enough to imply a mis-detected rate).
       </div>
       <div style={{ marginTop:12, color:"#ff9900", letterSpacing:2, fontSize:13 }}>DROPOUT RATE (%)</div>
       <div style={{ color:"#555" }}>
@@ -623,6 +644,17 @@ export default function SMPTEAnalyzer() {
   const decoderRef = useRef(null);
   const workletNodeRef = useRef(null);
   const sampleRateRef = useRef(48000);
+  // Measured sample rate: the worklet forwards every sample, so counting them
+  // against wall-clock time gives the *actual* delivery rate of the input —
+  // which can differ from the AudioContext's nominal rate when the device or
+  // OS is resampling (e.g. across a Dante clock domain). `marks` is a rolling
+  // ~4 s window of {t, n} (wall-clock ms, cumulative samples).
+  const sampleClockRef = useRef({ n: 0, marks: [] });
+  const measuredRateEmaRef = useRef(null);
+  const [measuredSampleRate, setMeasuredSampleRate] = useState(null);
+  // The current device's reported native rate (track.getSettings().sampleRate).
+  // Unlike the reused AudioContext's fixed rate, this updates per input.
+  const [deviceSampleRate, setDeviceSampleRate] = useState(null);
   const timeBufRef = useRef(null);
   // EMA state for the displayed SNR / THD / noise-floor gauges. The raw FFT
   // measurement is left untouched so the underlying math stays honest; only
@@ -636,6 +668,13 @@ export default function SMPTEAnalyzer() {
   const [audioDevices, setAudioDevices] = useState([]);
   const [currentDeviceId, setCurrentDeviceId] = useState(null);
   const [currentDeviceLabel, setCurrentDeviceLabel] = useState("");
+  // How many channels the current input exposes, and which one we tap for LTC.
+  // selectedChannelRef mirrors the state so wireSourceToDecoder (called from
+  // async paths) reads the latest value without a stale closure.
+  const [inputChannelCount, setInputChannelCount] = useState(1);
+  const [selectedChannel, setSelectedChannel] = useState(LTC_CHANNEL);
+  const selectedChannelRef = useRef(LTC_CHANNEL);
+  const splitterRef = useRef(null);
   const streamRef = useRef(null);
   const bufferSourceRef = useRef(null);
   const [playingFile, setPlayingFile] = useState(null); // { name, durationSec, loop }
@@ -671,6 +710,27 @@ export default function SMPTEAnalyzer() {
       lvl = linearToDB(rms);
       realPeakDb = linearToDB(peak);
       nz = Math.max(0, Math.min(1, (linearToDB(rms) - linearToDB(peak) + 30) / 30));
+    }
+
+    // Measured sample rate from the worklet's sample count over wall-clock
+    // time. Needs ≥0.5 s of window to be meaningful; EMA-smoothed so the
+    // readout doesn't jitter with per-chunk arrival timing.
+    if (useRealAudio) {
+      const sc = sampleClockRef.current;
+      if (sc.marks.length >= 2) {
+        const first = sc.marks[0];
+        const last = sc.marks[sc.marks.length - 1];
+        const dt = (last.t - first.t) / 1000;
+        if (dt >= 0.5) {
+          const inst = (last.n - first.n) / dt;
+          const ema = measuredRateEmaRef.current;
+          measuredRateEmaRef.current = ema == null ? inst : ema + 0.05 * (inst - ema);
+          setMeasuredSampleRate(Math.round(measuredRateEmaRef.current));
+        }
+      }
+    } else {
+      measuredRateEmaRef.current = null;
+      setMeasuredSampleRate(null);
     }
 
     const effectiveRate = useRealAudio
@@ -902,7 +962,7 @@ export default function SMPTEAnalyzer() {
   // Wires a source node into a fresh analyser + worklet + decoder on the
   // shared AudioContext. Returns the new analyser and worklet so callers
   // can stash them. Used by both the live-mic and file-playback paths.
-  function wireSourceToDecoder(ctx, source) {
+  function wireSourceToDecoder(ctx, source, channelCount) {
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 2048;
     // Defaults are tuned for VU-style visualisation, not measurement:
@@ -916,16 +976,60 @@ export default function SMPTEAnalyzer() {
     analyser.minDecibels = -120;
     analyser.maxDecibels = 0;
     analyser.smoothingTimeConstant = 0;
-    source.connect(analyser);
+    // LTC is always a single channel of timecode. Multichannel devices (e.g.
+    // Dante Virtual Soundcard) hand us 2+ channels with the code on one of
+    // them. Feeding that straight into the analyser/worklet triggers Web
+    // Audio's default "speakers" down-mix to mono — for stereo that's
+    // 0.5×(L+R), which halves a single-channel signal and reads 6.02 dB low
+    // vs. tools that read the discrete channel. A ChannelSplitter sized to the
+    // input lets us tap exactly one channel at unity, with no down-mix
+    // weighting. The tapped channel is user-selectable (selectedChannelRef).
+    const nCh = Math.max(1, channelCount || source.channelCount || 1);
+    const ch = Math.min(Math.max(0, selectedChannelRef.current), nCh - 1);
+    selectedChannelRef.current = ch;
+    setInputChannelCount(nCh);
+    setSelectedChannel(ch);
+    const splitter = ctx.createChannelSplitter(nCh);
+    splitterRef.current = splitter;
+    source.connect(splitter);
+    splitter.connect(analyser, ch);
     // numberOfOutputs:0 makes the worklet a pure sink — process() runs as
     // long as inputs are flowing, and we never touch ctx.destination, so
     // no system output stream is opened.
     const worklet = new AudioWorkletNode(ctx, "ltc-capture", { numberOfOutputs: 0 });
     const decoder = new MultiRateDecoder();
     decoderRef.current = decoder;
-    worklet.port.onmessage = (e) => decoder.feed(e.data, sampleRateRef.current);
-    source.connect(worklet);
+    // Fresh source → restart the measured-rate accounting so a device switch
+    // doesn't average across two clocks.
+    sampleClockRef.current = { n: 0, marks: [] };
+    measuredRateEmaRef.current = null;
+    worklet.port.onmessage = (e) => {
+      decoder.feed(e.data, sampleRateRef.current);
+      const sc = sampleClockRef.current;
+      sc.n += e.data.length;
+      const now = performance.now();
+      sc.marks.push({ t: now, n: sc.n });
+      while (sc.marks.length > 2 && now - sc.marks[0].t > 4000) sc.marks.shift();
+    };
+    splitter.connect(worklet, ch);
     return { analyser, worklet };
+  }
+
+  // Re-tap the splitter to a different input channel without rebuilding the
+  // stream/source graph. disconnect() on the splitter drops only its outgoing
+  // edges (to analyser + worklet); the source→splitter edge is untouched.
+  function selectInputChannel(idx) {
+    selectedChannelRef.current = idx;
+    setSelectedChannel(idx);
+    const sp = splitterRef.current;
+    const an = analyserRef.current;
+    const wk = workletNodeRef.current;
+    if (!sp || !an || !wk) return;
+    try { sp.disconnect(); } catch {}
+    sp.connect(an, idx);
+    sp.connect(wk, idx);
+    // The decoder self-heals on the new channel: with no fresh frames it
+    // unlocks after ~200 ms and the windowed metrics decay on their own.
   }
 
   // Tear down whatever source is currently feeding the decoder so a new one
@@ -938,6 +1042,7 @@ export default function SMPTEAnalyzer() {
     }
     if (sourceRef.current) { try { sourceRef.current.disconnect(); } catch {} sourceRef.current = null; }
     if (workletNodeRef.current) { try { workletNodeRef.current.disconnect(); } catch {} workletNodeRef.current = null; }
+    if (splitterRef.current) { try { splitterRef.current.disconnect(); } catch {} splitterRef.current = null; }
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(t => t.stop());
       streamRef.current = null;
@@ -952,6 +1057,11 @@ export default function SMPTEAnalyzer() {
       const constraints = {
         audio: {
           echoCancellation: false, noiseSuppression: false, autoGainControl: false,
+          // Ask for every channel the device exposes (Chrome clamps to the
+          // device max). Without this, multichannel inputs like Dante Virtual
+          // Soundcard are delivered as a single down-mixed channel and we'd
+          // never see the discrete LTC channel.
+          channelCount: { ideal: 64 },
           ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
         },
       };
@@ -961,11 +1071,12 @@ export default function SMPTEAnalyzer() {
       const settings = track?.getSettings?.() || {};
       setCurrentDeviceId(settings.deviceId || deviceId || null);
       setCurrentDeviceLabel(track?.label || "Unknown input");
+      setDeviceSampleRate(settings.sampleRate ?? null);
       refreshAudioDevices();
 
       const ctx = await getOrCreateAudioContext();
       const source = ctx.createMediaStreamSource(stream);
-      const { analyser, worklet } = wireSourceToDecoder(ctx, source);
+      const { analyser, worklet } = wireSourceToDecoder(ctx, source, settings.channelCount);
 
       analyserRef.current = analyser;
       sourceRef.current = source;
@@ -1005,7 +1116,7 @@ export default function SMPTEAnalyzer() {
       const source = ctx.createBufferSource();
       source.buffer = audioBuffer;
       source.loop = true;
-      const { analyser, worklet } = wireSourceToDecoder(ctx, source);
+      const { analyser, worklet } = wireSourceToDecoder(ctx, source, audioBuffer.numberOfChannels);
       source.start();
 
       bufferSourceRef.current = source;
@@ -1452,6 +1563,24 @@ export default function SMPTEAnalyzer() {
                     color:"#666", padding:"4px 10px", fontSize:12, letterSpacing:1,
                   }}
                 >↻</button>
+                {inputChannelCount > 1 && (
+                  <>
+                    <div style={{ fontSize:11, color:"#555", letterSpacing:2 }}>CH</div>
+                    <select
+                      value={selectedChannel}
+                      onChange={e => selectInputChannel(Number(e.target.value))}
+                      title="Input channel carrying the LTC"
+                      style={{ fontSize:12 }}
+                    >
+                      {Array.from({ length: inputChannelCount }, (_, i) => (
+                        <option key={i} value={i}>{`CH ${i + 1}`}</option>
+                      ))}
+                    </select>
+                    <span style={{ fontSize:11, color:"#555", letterSpacing:1 }}>
+                      of {inputChannelCount}
+                    </span>
+                  </>
+                )}
                 <div style={{ fontSize:11, color:"#00ff88", fontFamily:"monospace", letterSpacing:2 }}>
                   ● LIVE
                 </div>
@@ -1563,13 +1692,13 @@ export default function SMPTEAnalyzer() {
               <span style={{ color:"#ccc" }}>{analysis?.framesDecoded ?? 0}</span>
               <span style={{ color:"#555", letterSpacing:2 }}>BIT ERRORS</span>
               <span style={{ color: (analysis?.bitErrors ?? 0) > 0 ? "#ff9900" : "#ccc" }}>{analysis?.bitErrors ?? 0}</span>
-              <span style={{ color:"#555", letterSpacing:2 }}>INPUT LEVEL</span>
-              <span style={{ color:"#ccc" }}>{analysis ? `${analysis.rmsDbFS?.toFixed?.(1) ?? "—"} dBFS` : "—"}</span>
               <span style={{ color:"#555", letterSpacing:2 }}>SAMPLE RATE</span>
               <span style={{ color:"#666" }}>
                 {playingFile?.nativeSampleRate
                   ? `${playingFile.nativeSampleRate} Hz file · ${playingFile.decoderSampleRate} Hz decoded`
-                  : `${sampleRateRef.current} Hz`}
+                  : measuredSampleRate != null
+                    ? `${measuredSampleRate} Hz measured · ${deviceSampleRate || sampleRateRef.current} Hz nominal`
+                    : `${deviceSampleRate || sampleRateRef.current} Hz nominal`}
               </span>
               <span style={{ color:"#555", letterSpacing:2 }}>CLOCK DRIFT</span>
               {(() => {
@@ -1578,11 +1707,15 @@ export default function SMPTEAnalyzer() {
                   return <span style={{ color:"#666" }}>—</span>;
                 }
                 const abs = Math.abs(d);
-                // Solid lock < 5 ppm, mild drift up to 50 ppm, anything
-                // above ≈100 ppm indicates the source is not matching either
-                // standard SMPTE rate within transport-jitter tolerances.
-                const color = abs < 5 ? "#00ff88" : abs < 50 ? "#ffaa00" : "#ff3b3b";
-                const status = abs < 5 ? "SOLID" : abs < 50 ? "DRIFTING" : "OFF-RATE";
+                // Clock drift is a steady FREQUENCY OFFSET between the source
+                // and our capture clock — it does NOT affect chasing/resolving,
+                // which slaves to whatever rate arrives. So a non-trivial
+                // offset is informational, not a fault. Only flag a warning
+                // when the offset is large enough to suggest a mis-detected
+                // rate (≈±500 ppm ≫ any real generator). What actually breaks
+                // a chase is continuity breaks + dropouts, reported separately.
+                const color = abs < 5 ? "#00ff88" : abs < 500 ? "#22d3ee" : "#ffaa00";
+                const status = abs < 5 ? "LOCKED" : abs < 500 ? "OFFSET · OK TO CHASE" : "CHECK RATE";
                 const sign = d > 0 ? "+" : d < 0 ? "−" : "";
                 return (
                   <span style={{ color }}>
