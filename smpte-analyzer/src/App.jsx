@@ -628,6 +628,17 @@ export default function SMPTEAnalyzer() {
   const decoderRef = useRef(null);
   const workletNodeRef = useRef(null);
   const sampleRateRef = useRef(48000);
+  // Measured sample rate: the worklet forwards every sample, so counting them
+  // against wall-clock time gives the *actual* delivery rate of the input —
+  // which can differ from the AudioContext's nominal rate when the device or
+  // OS is resampling (e.g. across a Dante clock domain). `marks` is a rolling
+  // ~4 s window of {t, n} (wall-clock ms, cumulative samples).
+  const sampleClockRef = useRef({ n: 0, marks: [] });
+  const measuredRateEmaRef = useRef(null);
+  const [measuredSampleRate, setMeasuredSampleRate] = useState(null);
+  // The current device's reported native rate (track.getSettings().sampleRate).
+  // Unlike the reused AudioContext's fixed rate, this updates per input.
+  const [deviceSampleRate, setDeviceSampleRate] = useState(null);
   const timeBufRef = useRef(null);
   // EMA state for the displayed SNR / THD / noise-floor gauges. The raw FFT
   // measurement is left untouched so the underlying math stays honest; only
@@ -683,6 +694,27 @@ export default function SMPTEAnalyzer() {
       lvl = linearToDB(rms);
       realPeakDb = linearToDB(peak);
       nz = Math.max(0, Math.min(1, (linearToDB(rms) - linearToDB(peak) + 30) / 30));
+    }
+
+    // Measured sample rate from the worklet's sample count over wall-clock
+    // time. Needs ≥0.5 s of window to be meaningful; EMA-smoothed so the
+    // readout doesn't jitter with per-chunk arrival timing.
+    if (useRealAudio) {
+      const sc = sampleClockRef.current;
+      if (sc.marks.length >= 2) {
+        const first = sc.marks[0];
+        const last = sc.marks[sc.marks.length - 1];
+        const dt = (last.t - first.t) / 1000;
+        if (dt >= 0.5) {
+          const inst = (last.n - first.n) / dt;
+          const ema = measuredRateEmaRef.current;
+          measuredRateEmaRef.current = ema == null ? inst : ema + 0.05 * (inst - ema);
+          setMeasuredSampleRate(Math.round(measuredRateEmaRef.current));
+        }
+      }
+    } else {
+      measuredRateEmaRef.current = null;
+      setMeasuredSampleRate(null);
     }
 
     const effectiveRate = useRealAudio
@@ -951,7 +983,18 @@ export default function SMPTEAnalyzer() {
     const worklet = new AudioWorkletNode(ctx, "ltc-capture", { numberOfOutputs: 0 });
     const decoder = new MultiRateDecoder();
     decoderRef.current = decoder;
-    worklet.port.onmessage = (e) => decoder.feed(e.data, sampleRateRef.current);
+    // Fresh source → restart the measured-rate accounting so a device switch
+    // doesn't average across two clocks.
+    sampleClockRef.current = { n: 0, marks: [] };
+    measuredRateEmaRef.current = null;
+    worklet.port.onmessage = (e) => {
+      decoder.feed(e.data, sampleRateRef.current);
+      const sc = sampleClockRef.current;
+      sc.n += e.data.length;
+      const now = performance.now();
+      sc.marks.push({ t: now, n: sc.n });
+      while (sc.marks.length > 2 && now - sc.marks[0].t > 4000) sc.marks.shift();
+    };
     splitter.connect(worklet, ch);
     return { analyser, worklet };
   }
@@ -1012,6 +1055,7 @@ export default function SMPTEAnalyzer() {
       const settings = track?.getSettings?.() || {};
       setCurrentDeviceId(settings.deviceId || deviceId || null);
       setCurrentDeviceLabel(track?.label || "Unknown input");
+      setDeviceSampleRate(settings.sampleRate ?? null);
       refreshAudioDevices();
 
       const ctx = await getOrCreateAudioContext();
@@ -1632,13 +1676,13 @@ export default function SMPTEAnalyzer() {
               <span style={{ color:"#ccc" }}>{analysis?.framesDecoded ?? 0}</span>
               <span style={{ color:"#555", letterSpacing:2 }}>BIT ERRORS</span>
               <span style={{ color: (analysis?.bitErrors ?? 0) > 0 ? "#ff9900" : "#ccc" }}>{analysis?.bitErrors ?? 0}</span>
-              <span style={{ color:"#555", letterSpacing:2 }}>INPUT LEVEL</span>
-              <span style={{ color:"#ccc" }}>{analysis ? `${analysis.rmsDbFS?.toFixed?.(1) ?? "—"} dBFS` : "—"}</span>
               <span style={{ color:"#555", letterSpacing:2 }}>SAMPLE RATE</span>
               <span style={{ color:"#666" }}>
                 {playingFile?.nativeSampleRate
                   ? `${playingFile.nativeSampleRate} Hz file · ${playingFile.decoderSampleRate} Hz decoded`
-                  : `${sampleRateRef.current} Hz`}
+                  : measuredSampleRate != null
+                    ? `${measuredSampleRate} Hz measured · ${deviceSampleRate || sampleRateRef.current} Hz nominal`
+                    : `${deviceSampleRate || sampleRateRef.current} Hz nominal`}
               </span>
               <span style={{ color:"#555", letterSpacing:2 }}>CLOCK DRIFT</span>
               {(() => {
@@ -1807,6 +1851,19 @@ export default function SMPTEAnalyzer() {
       {/* SMPTE Spec Reference — bottom of page */}
       <div style={{ marginTop:12 }}>
         <SpecRefPanel />
+      </div>
+
+      {/* Sample-rate readout note */}
+      <div style={{ marginTop:12, fontSize:11, lineHeight:1.6, color:"#555", maxWidth:760 }}>
+        <span style={{ color:"#777", letterSpacing:2 }}>NOTE ON SAMPLE RATE — </span>
+        <b style={{ color:"#888" }}>nominal</b> is the device's declared rate (from the
+        browser's <code style={{ color:"#888" }}>getSettings().sampleRate</code>, falling back to the
+        audio engine's fixed rate); it's a reported integer, not a measurement.
+        {" "}
+        <b style={{ color:"#888" }}>measured</b> is the true sample-delivery rate, counted from the
+        capture worklet over wall-clock time. Because Web Audio resamples the input into a single
+        long-lived context, <i>measured</i> tracks the context clock — so a gap between the two
+        usually means the OS is resampling the device, not a fault.
       </div>
     </div>
   );
