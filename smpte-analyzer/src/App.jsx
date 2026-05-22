@@ -1691,11 +1691,15 @@ export default function SMPTEAnalyzer() {
                   return <span style={{ color:"#666" }}>—</span>;
                 }
                 const abs = Math.abs(d);
-                // Solid lock < 5 ppm, mild drift up to 50 ppm, anything
-                // above ≈100 ppm indicates the source is not matching either
-                // standard SMPTE rate within transport-jitter tolerances.
-                const color = abs < 5 ? "#00ff88" : abs < 50 ? "#ffaa00" : "#ff3b3b";
-                const status = abs < 5 ? "SOLID" : abs < 50 ? "DRIFTING" : "OFF-RATE";
+                // Clock drift is a steady FREQUENCY OFFSET between the source
+                // and our capture clock — it does NOT affect chasing/resolving,
+                // which slaves to whatever rate arrives. So a non-trivial
+                // offset is informational, not a fault. Only flag a warning
+                // when the offset is large enough to suggest a mis-detected
+                // rate (≈±500 ppm ≫ any real generator). What actually breaks
+                // a chase is continuity breaks + dropouts, reported separately.
+                const color = abs < 5 ? "#00ff88" : abs < 500 ? "#22d3ee" : "#ffaa00";
+                const status = abs < 5 ? "LOCKED" : abs < 500 ? "OFFSET · OK TO CHASE" : "CHECK RATE";
                 const sign = d > 0 ? "+" : d < 0 ? "−" : "";
                 return (
                   <span style={{ color }}>
@@ -1864,6 +1868,14 @@ export default function SMPTEAnalyzer() {
         capture worklet over wall-clock time. Because Web Audio resamples the input into a single
         long-lived context, <i>measured</i> tracks the context clock — so a gap between the two
         usually means the OS is resampling the device, not a fault.
+        <br /><br />
+        <span style={{ color:"#777", letterSpacing:2 }}>NOTE ON CLOCK DRIFT — </span>
+        drift is a steady <b style={{ color:"#888" }}>frequency offset</b> between the timecode
+        source and this capture clock. It does <b style={{ color:"#888" }}>not</b> affect chasing or
+        resolving — slave devices lock to whatever rate arrives, absorbing a constant offset of
+        even a few hundred ppm. What actually disrupts a chase is shown separately: the
+        {" "}<b style={{ color:"#888" }}>DROPOUT RATE</b> and continuity breaks
+        (JUMP / REPEAT / REWIND). A steady offset reading <i>OK TO CHASE</i> is not a fault to fix.
       </div>
     </div>
   );
