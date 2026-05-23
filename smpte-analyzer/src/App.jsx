@@ -1703,9 +1703,9 @@ export default function SMPTEAnalyzer() {
               <span style={{ color:"#666" }}>
                 {playingFile?.nativeSampleRate
                   ? `${playingFile.nativeSampleRate} Hz file · ${playingFile.decoderSampleRate} Hz decoded`
-                  : measuredSampleRate != null
+                  : ltcLocked && measuredSampleRate != null
                     ? `${measuredSampleRate} Hz measured · ${deviceSampleRate || sampleRateRef.current} Hz nominal`
-                    : `${deviceSampleRate || sampleRateRef.current} Hz nominal`}
+                    : `— measured · ${deviceSampleRate || sampleRateRef.current} Hz nominal`}
               </span>
               <span style={{ color:"#555", letterSpacing:2 }}>CLOCK DRIFT</span>
               {(() => {
