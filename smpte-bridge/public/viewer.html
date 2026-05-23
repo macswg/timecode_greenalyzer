@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#000000">
+<title>SMPTE bridge viewer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=B612+Mono:wght@400;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #000;
+    --fg: #e6e6e6;
+    --dim: #333;
+    --panel: #0a0a0a;
+    --border: #1f1f1f;
+    --green: #00ff88;
+    --red: #ff3b3b;
+    --grey: #666;
+    --orange: #ffaa00;
+    --blue: #3b9cff;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg); color: var(--fg);
+    font-family: "Share Tech Mono", monospace;
+    height: 100%;
+    -webkit-text-size-adjust: 100%;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  body {
+    display: flex; flex-direction: column;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px; letter-spacing: 3px; color: #888;
+  }
+  .dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--grey);
+    box-shadow: 0 0 6px currentColor;
+    transition: background 0.15s;
+  }
+  .dot.open  { background: var(--green); }
+  .dot.closed{ background: var(--red); }
+  .conn-text { color: #aaa; }
+  .spacer { flex: 1; }
+  .lock {
+    padding: 2px 8px; border: 1px solid var(--dim); color: var(--dim);
+    font-size: 10px; letter-spacing: 2px;
+  }
+  .lock.on { color: var(--green); border-color: var(--green); }
+
+  main {
+    flex: 1;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 14px;
+    padding: 18px 10px;
+    min-height: 0;
+  }
+  .tc {
+    font-family: "B612 Mono", "Share Tech Mono", monospace;
+    font-weight: 700;
+    font-size: clamp(48px, 18vw, 200px);
+    line-height: 1;
+    letter-spacing: 0.02em;
+    color: var(--fg);
+    text-shadow: 0 0 12px rgba(255,255,255,0.18);
+    white-space: nowrap;
+  }
+  .tc.dim { color: var(--dim); text-shadow: none; }
+  .rate {
+    font-size: clamp(14px, 3.5vw, 22px);
+    letter-spacing: 4px;
+    color: var(--blue);
+  }
+  .rate.df { color: var(--orange); }
+  .rate.hidden { visibility: hidden; }
+
+  .errors {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    justify-content: center;
+    min-height: 22px;
+  }
+  .tag {
+    font-size: 11px; letter-spacing: 2px;
+    padding: 2px 8px;
+    border: 1px solid var(--red);
+    color: var(--red);
+  }
+
+  .breaks {
+    width: 100%;
+    max-width: 720px;
+    border-top: 1px solid var(--border);
+    padding: 8px 14px 14px;
+    font-size: 11px;
+    color: #999;
+  }
+  .breaks-title {
+    letter-spacing: 3px; color: #666; margin-bottom: 6px;
+  }
+  .breaks ul { list-style: none; margin: 0; padding: 0; }
+  .breaks li {
+    display: flex; gap: 10px;
+    padding: 2px 0;
+    border-bottom: 1px dotted #1a1a1a;
+    font-family: "B612 Mono", monospace;
+  }
+  .breaks li:last-child { border-bottom: 0; }
+  .bt { width: 60px; }
+  .bt.JUMP   { color: var(--orange); }
+  .bt.REPEAT { color: #ffd24a; }
+  .bt.REWIND { color: var(--blue); }
+  .bd { color: #777; width: 60px; }
+  .br { color: #bbb; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span>
+  <span class="conn-text" id="conn">CONNECTING</span>
+  <span class="spacer"></span>
+  <span class="lock" id="lock">LOCK</span>
+</header>
+
+<main>
+  <div class="tc dim" id="tc">00:00:00:00</div>
+  <div class="rate hidden" id="rate">—</div>
+  <div class="errors" id="errors"></div>
+</main>
+
+<section class="breaks">
+  <div class="breaks-title">CONTINUITY BREAKS</div>
+  <ul id="breaks"></ul>
+</section>
+
+<script>
+(() => {
+  const DF_RATES = new Set(["29.97df", "59.94df"]);
+  const STALE_MS = 500;
+  const MAX_BREAKS = 10;
+
+  const dotEl    = document.getElementById("dot");
+  const connEl   = document.getElementById("conn");
+  const lockEl   = document.getElementById("lock");
+  const tcEl     = document.getElementById("tc");
+  const rateEl   = document.getElementById("rate");
+  const errorsEl = document.getElementById("errors");
+  const breaksEl = document.getElementById("breaks");
+
+  let ws = null;
+  let reconnectMs = 1000;
+  let lastTcAt = 0;
+  let staleTimer = null;
+
+  const pad = (n, w = 2) => String(n).padStart(w, "0");
+  function fmtTc(msg) {
+    const sep = msg.dropFrame ? ";" : ":";
+    return `${pad(msg.hh)}:${pad(msg.mm)}:${pad(msg.ss)}${sep}${pad(msg.ff)}`;
+  }
+
+  function setConn(state) {
+    dotEl.classList.remove("open", "closed");
+    if (state === "open") {
+      dotEl.classList.add("open");
+      connEl.textContent = "CONNECTED";
+    } else if (state === "closed" || state === "error") {
+      dotEl.classList.add("closed");
+      connEl.textContent = "DISCONNECTED";
+    } else {
+      connEl.textContent = "CONNECTING";
+    }
+  }
+
+  function applyTc(msg) {
+    tcEl.textContent = fmtTc(msg);
+    tcEl.classList.remove("dim");
+    lockEl.classList.add("on");
+    rateEl.textContent = msg.rate || "";
+    rateEl.classList.toggle("df", DF_RATES.has(msg.rate));
+    rateEl.classList.toggle("hidden", !msg.rate);
+    lastTcAt = Date.now();
+    scheduleStale();
+  }
+
+  function markStale() {
+    tcEl.classList.add("dim");
+    lockEl.classList.remove("on");
+  }
+
+  function scheduleStale() {
+    clearTimeout(staleTimer);
+    staleTimer = setTimeout(() => {
+      if (Date.now() - lastTcAt >= STALE_MS) markStale();
+    }, STALE_MS + 20);
+  }
+
+  function applyErrors(errs) {
+    errorsEl.replaceChildren(...(errs || []).map(e => {
+      const el = document.createElement("span");
+      el.className = "tag";
+      el.textContent = e;
+      return el;
+    }));
+  }
+
+  function prependBreak(msg) {
+    const li = document.createElement("li");
+    const t = document.createElement("span"); t.className = `bt ${msg.breakType}`; t.textContent = msg.breakType;
+    const d = document.createElement("span"); d.className = "bd"; d.textContent = (msg.delta > 0 ? "+" : "") + msg.delta;
+    const r = document.createElement("span"); r.className = "br"; r.textContent = `${msg.from} → ${msg.to}`;
+    li.append(t, d, r);
+    breaksEl.prepend(li);
+    while (breaksEl.children.length > MAX_BREAKS) breaksEl.lastChild.remove();
+  }
+
+  function handle(msg) {
+    if (!msg || !msg.type) return;
+    if (msg.type === "hello") {
+      if (msg.lastTc) applyTc(msg.lastTc);
+    } else if (msg.type === "tc") {
+      applyTc(msg);
+    } else if (msg.type === "error") {
+      applyErrors(msg.errors);
+    } else if (msg.type === "continuity") {
+      prependBreak(msg);
+    }
+  }
+
+  function connect() {
+    setConn("connecting");
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    ws = new WebSocket(`${proto}//${location.host}/subscribe`);
+    ws.onopen = () => { reconnectMs = 1000; setConn("open"); };
+    ws.onmessage = (e) => {
+      try { handle(JSON.parse(e.data)); } catch { /* ignore */ }
+    };
+    ws.onerror = () => { /* close handler will reconnect */ };
+    ws.onclose = () => {
+      setConn("closed");
+      markStale();
+      applyErrors([]);
+      setTimeout(connect, reconnectMs);
+      reconnectMs = Math.min(reconnectMs * 2, 10000);
+    };
+  }
+
+  connect();
+})();
+</script>
+</body>
+</html>

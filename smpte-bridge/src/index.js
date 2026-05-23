@@ -5,16 +5,49 @@
 // Future phases will fan out to OSC and Art-Net from the same ingest stream.
 
 import http from "node:http";
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import { dirname, join, normalize, extname } from "node:path";
 import { WebSocketServer } from "ws";
 
 const PORT = Number(process.env.PORT || 8765);
+const PUBLIC_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "public");
+const MIME = {
+  ".html": "text/html; charset=utf-8",
+  ".css":  "text/css; charset=utf-8",
+  ".js":   "application/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg":  "image/svg+xml",
+  ".png":  "image/png",
+  ".ico":  "image/x-icon",
+};
 
 const subscribers = new Set();
 let publisher = null;
 let lastTc = null;
 let stats = { framesIn: 0, framesOut: 0, errorsIn: 0, startedAt: Date.now() };
 
-const server = http.createServer((req, res) => {
+async function serveStatic(req, res) {
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    res.writeHead(405); res.end(); return true;
+  }
+  const urlPath = req.url.split("?")[0];
+  const rel = urlPath === "/" ? "viewer.html" : urlPath.replace(/^\/+/, "");
+  const full = normalize(join(PUBLIC_DIR, rel));
+  if (!full.startsWith(PUBLIC_DIR)) { res.writeHead(403); res.end(); return true; }
+  try {
+    const body = await readFile(full);
+    const type = MIME[extname(full).toLowerCase()] || "application/octet-stream";
+    res.writeHead(200, { "content-type": type, "cache-control": "no-cache" });
+    res.end(req.method === "HEAD" ? undefined : body);
+    return true;
+  } catch (e) {
+    if (e.code === "ENOENT") return false;
+    res.writeHead(500); res.end(); return true;
+  }
+}
+
+const server = http.createServer(async (req, res) => {
   if (req.url === "/status") {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({
@@ -25,6 +58,7 @@ const server = http.createServer((req, res) => {
     }, null, 2));
     return;
   }
+  if (await serveStatic(req, res)) return;
   res.writeHead(404); res.end();
 });
 
@@ -93,4 +127,5 @@ server.listen(PORT, () => {
   console.log(`  publish  →  ws://localhost:${PORT}/ingest`);
   console.log(`  subscribe → ws://localhost:${PORT}/subscribe`);
   console.log(`  status   →  http://localhost:${PORT}/status`);
+  console.log(`  viewer   →  http://localhost:${PORT}/`);
 });

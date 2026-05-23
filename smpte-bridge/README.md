@@ -21,6 +21,24 @@ Listens on `:8765` by default (`PORT=9000 npm start` to override).
   JSON feed verbatim.
 - `http://localhost:8765/status` — JSON snapshot (publisher state, subscriber
   count, frame counters, last timecode).
+- `http://localhost:8765/` — phone-friendly live viewer (see below).
+
+## Phone viewer
+
+Open `http://localhost:8765/` in any browser to see the running timecode, the
+current error tags, and the last 10 continuity breaks. The page connects to
+`/subscribe` itself and auto-reconnects with 1 s → 10 s back-off.
+
+To view from a phone on the same Wi-Fi:
+
+1. Start the bridge (`npm start`) and click **▶ PUBLISH** in the analyzer.
+2. Get the Mac's LAN IP: `ipconfig getifaddr en0` (or `en1` on Wi-Fi-only
+   machines).
+3. On the phone, open `http://<that-ip>:8765/`.
+
+The viewer needs no audio input of its own — it's purely a readout of whatever
+the analyzer is currently publishing. Drop-frame rates render with `;` and an
+orange rate label; non-drop with `:` and blue, matching the analyzer.
 
 ## Message types
 
