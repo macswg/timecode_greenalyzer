@@ -790,6 +790,7 @@ export default function SMPTEAnalyzer() {
         data.frameValid = true;
       } else {
         data.hh = 0; data.mm = 0; data.ss = 0; data.ff = 0;
+        data.dropFrame = false;
         data.colorFrame = false;
         data.frameValid = false;
       }
@@ -877,7 +878,13 @@ export default function SMPTEAnalyzer() {
         hh: data.hh, mm: data.mm, ss: data.ss, ff: data.ff,
         rate: rateKey, dropFrame: data.dropFrame,
         source: useRealAudio ? "live" : "sim",
+        ltcLocked: useRealAudio ? !!data.ltcLocked : true,
+        frameValid: data.frameValid !== false,
         levelDbFS: +lvl.toFixed(2),
+        peakDbFS: Number.isFinite(data.peakDbFS) ? +data.peakDbFS.toFixed(2) : null,
+        driftPpm:   Number.isFinite(data.driftPpm)   ? +data.driftPpm.toFixed(2)   : null,
+        dropoutPct: Number.isFinite(data.dropoutPct) ? +data.dropoutPct.toFixed(2) : null,
+        snr:        Number.isFinite(data.snr)        ? +data.snr.toFixed(1)        : null,
         errors: data.errors,
       });
     }
@@ -1419,7 +1426,7 @@ export default function SMPTEAnalyzer() {
             </div>
             <div style={{ display:"flex", gap:6, flexWrap:"wrap", justifyContent:"flex-end" }}>
               <StatusBadge label="LOCK" active={!bootstrapping && analysis?.frameValid === true} color="#00ff88" />
-              <StatusBadge label="DF" active={tc.dropFrame} color="#ffaa00" />
+              <StatusBadge label="DF" active={tc.dropFrame && (!liveMode || !!analysis?.ltcLocked)} color="#ffaa00" />
               <StatusBadge label="CF" active={tc.colorFrame} color="#8888ff" />
             </div>
           </div>

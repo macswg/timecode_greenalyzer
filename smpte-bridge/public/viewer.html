@@ -48,15 +48,17 @@
     box-shadow: 0 0 6px currentColor;
     transition: background 0.15s;
   }
-  .dot.open  { background: var(--green); }
-  .dot.closed{ background: var(--red); }
+  .dot.open    { background: var(--green); }
+  .dot.waiting { background: var(--orange); }
+  .dot.closed  { background: var(--red); }
   .conn-text { color: #aaa; }
   .spacer { flex: 1; }
-  .lock {
+  .badge {
     padding: 2px 8px; border: 1px solid var(--dim); color: var(--dim);
     font-size: 10px; letter-spacing: 2px;
   }
-  .lock.on { color: var(--green); border-color: var(--green); }
+  .badge.on.lock { color: var(--green); border-color: var(--green); }
+  .badge.on.df   { color: var(--orange); border-color: var(--orange); box-shadow: 0 0 8px rgba(255,170,0,0.35); }
 
   main {
     flex: 1;
@@ -69,21 +71,38 @@
   .tc {
     font-family: "B612 Mono", "Share Tech Mono", monospace;
     font-weight: 700;
-    font-size: clamp(48px, 18vw, 200px);
+    font-size: clamp(36px, 12vw, 160px);
     line-height: 1;
-    letter-spacing: 0.02em;
-    color: var(--fg);
-    text-shadow: 0 0 12px rgba(255,255,255,0.18);
+    letter-spacing: 0.03em;
+    color: var(--green);
+    text-shadow: 0 0 20px rgba(0,255,136,0.5), 0 0 40px rgba(0,255,136,0.2);
     white-space: nowrap;
+    transition: color 0.1s, text-shadow 0.1s;
   }
+  .tc .sep { opacity: 0.5; }
+  .tc.invalid { color: var(--red); text-shadow: 0 0 20px rgba(255,59,59,0.5); }
   .tc.dim { color: var(--dim); text-shadow: none; }
   .rate {
-    font-size: clamp(14px, 3.5vw, 22px);
+    font-size: clamp(22px, 6vw, 36px);
     letter-spacing: 4px;
     color: var(--blue);
   }
   .rate.df { color: var(--orange); }
   .rate.hidden { visibility: hidden; }
+
+  .metrics {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px 14px;
+    width: 100%;
+    max-width: 520px;
+    padding: 0 14px;
+    font-family: "B612 Mono", monospace;
+  }
+  .metric { display: flex; flex-direction: column; gap: 2px; }
+  .metric .lbl { font-size: 9px; letter-spacing: 2px; color: #666; }
+  .metric .val { font-size: 16px; color: #ddd; }
+  .metric .val.muted { color: #555; }
 
   .errors {
     display: flex; flex-wrap: wrap; gap: 6px;
@@ -129,13 +148,22 @@
   <span class="dot" id="dot"></span>
   <span class="conn-text" id="conn">CONNECTING</span>
   <span class="spacer"></span>
-  <span class="lock" id="lock">LOCK</span>
+  <span class="badge df"   id="df">DF</span>
+  <span class="badge lock" id="lock">LOCK</span>
 </header>
 
 <main>
   <div class="tc dim" id="tc">00:00:00:00</div>
   <div class="rate hidden" id="rate">—</div>
   <div class="errors" id="errors"></div>
+  <div class="metrics">
+    <div class="metric"><span class="lbl">SOURCE</span>     <span class="val muted" id="m-src">—</span></div>
+    <div class="metric"><span class="lbl">CONFIDENCE</span> <span class="val muted" id="m-conf">—</span></div>
+    <div class="metric"><span class="lbl">SUBS</span>       <span class="val muted" id="m-subs">—</span></div>
+    <div class="metric"><span class="lbl">LEVEL (RMS)</span><span class="val muted" id="m-lvl">—</span></div>
+    <div class="metric"><span class="lbl">DRIFT</span>      <span class="val muted" id="m-drift">—</span></div>
+    <div class="metric"><span class="lbl">SNR</span>        <span class="val muted" id="m-snr">—</span></div>
+  </div>
 </main>
 
 <section class="breaks">
@@ -152,49 +180,102 @@
   const dotEl    = document.getElementById("dot");
   const connEl   = document.getElementById("conn");
   const lockEl   = document.getElementById("lock");
+  const dfEl     = document.getElementById("df");
   const tcEl     = document.getElementById("tc");
   const rateEl   = document.getElementById("rate");
   const errorsEl = document.getElementById("errors");
   const breaksEl = document.getElementById("breaks");
+  const mSrc     = document.getElementById("m-src");
+  const mConf    = document.getElementById("m-conf");
+  const mSubs    = document.getElementById("m-subs");
+  const mLvl     = document.getElementById("m-lvl");
+  const mDrift   = document.getElementById("m-drift");
+  const mSnr     = document.getElementById("m-snr");
+
+  const setVal = (el, txt, muted = false) => {
+    el.textContent = txt;
+    el.classList.toggle("muted", muted || txt === "—");
+  };
 
   let ws = null;
   let reconnectMs = 1000;
   let lastTcAt = 0;
   let staleTimer = null;
+  let wsOpen = false;
+  let pubConnected = false;
 
   const pad = (n, w = 2) => String(n).padStart(w, "0");
-  function fmtTc(msg) {
+  function renderTc(msg) {
     const sep = msg.dropFrame ? ";" : ":";
-    return `${pad(msg.hh)}:${pad(msg.mm)}:${pad(msg.ss)}${sep}${pad(msg.ff)}`;
+    tcEl.replaceChildren(
+      document.createTextNode(pad(msg.hh)),
+      sepSpan(":"),
+      document.createTextNode(pad(msg.mm)),
+      sepSpan(":"),
+      document.createTextNode(pad(msg.ss)),
+      sepSpan(sep),
+      document.createTextNode(pad(msg.ff)),
+    );
+  }
+  function sepSpan(ch) {
+    const s = document.createElement("span");
+    s.className = "sep";
+    s.textContent = ch;
+    return s;
   }
 
-  function setConn(state) {
-    dotEl.classList.remove("open", "closed");
-    if (state === "open") {
-      dotEl.classList.add("open");
-      connEl.textContent = "CONNECTED";
-    } else if (state === "closed" || state === "error") {
+  function refreshConn() {
+    dotEl.classList.remove("open", "closed", "waiting");
+    if (!wsOpen) {
       dotEl.classList.add("closed");
       connEl.textContent = "DISCONNECTED";
+    } else if (!pubConnected) {
+      dotEl.classList.add("waiting");
+      connEl.textContent = "NO PUBLISHER";
     } else {
-      connEl.textContent = "CONNECTING";
+      dotEl.classList.add("open");
+      connEl.textContent = "CONNECTED";
     }
   }
 
   function applyTc(msg) {
-    tcEl.textContent = fmtTc(msg);
-    tcEl.classList.remove("dim");
-    lockEl.classList.add("on");
+    renderTc(msg);
+    // Match the main app: locked == decoder has a fresh frame;
+    // valid == locked AND no error tags. DF/LOCK only light when locked,
+    // so they don't stay on when code stops rolling.
+    const locked = msg.ltcLocked !== false;
+    const valid = locked && (msg.frameValid !== false)
+      && (!msg.errors || msg.errors.length === 0);
+    tcEl.classList.toggle("dim", !locked);
+    tcEl.classList.toggle("invalid", locked && !valid);
+    lockEl.classList.toggle("on", valid);
+    dfEl.classList.toggle("on", locked && !!msg.dropFrame);
+    if (msg.errors) applyErrors(msg.errors);
     rateEl.textContent = msg.rate || "";
     rateEl.classList.toggle("df", DF_RATES.has(msg.rate));
     rateEl.classList.toggle("hidden", !msg.rate);
+
+    setVal(mSrc, msg.source ? msg.source.toUpperCase() : "—");
+    setVal(mLvl, Number.isFinite(msg.levelDbFS) ? `${msg.levelDbFS.toFixed(1)} dBFS` : "—");
+    setVal(mDrift, Number.isFinite(msg.driftPpm) ? `${msg.driftPpm > 0 ? "+" : ""}${msg.driftPpm.toFixed(1)} ppm` : "—");
+    setVal(mSnr, Number.isFinite(msg.snr) ? `${msg.snr.toFixed(1)} dB` : "—");
+    if (Number.isFinite(msg.dropoutPct)) {
+      const conf = Math.max(0, Math.min(99.5, 100 - msg.dropoutPct));
+      setVal(mConf, `${conf.toFixed(1)} %`);
+    } else {
+      setVal(mConf, "—");
+    }
+
     lastTcAt = Date.now();
     scheduleStale();
   }
 
   function markStale() {
     tcEl.classList.add("dim");
+    tcEl.classList.remove("invalid");
     lockEl.classList.remove("on");
+    dfEl.classList.remove("on");
+    setVal(mLvl, "—"); setVal(mDrift, "—"); setVal(mSnr, "—"); setVal(mConf, "—");
   }
 
   function scheduleStale() {
@@ -233,20 +314,25 @@
       applyErrors(msg.errors);
     } else if (msg.type === "continuity") {
       prependBreak(msg);
+    } else if (msg.type === "status") {
+      setVal(mSubs, Number.isFinite(msg.subscribers) ? String(msg.subscribers) : "—");
+      pubConnected = !!msg.publisher;
+      refreshConn();
+      if (!pubConnected) markStale();
     }
   }
 
   function connect() {
-    setConn("connecting");
+    wsOpen = false; pubConnected = false; refreshConn();
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     ws = new WebSocket(`${proto}//${location.host}/subscribe`);
-    ws.onopen = () => { reconnectMs = 1000; setConn("open"); };
+    ws.onopen = () => { reconnectMs = 1000; wsOpen = true; refreshConn(); };
     ws.onmessage = (e) => {
       try { handle(JSON.parse(e.data)); } catch { /* ignore */ }
     };
     ws.onerror = () => { /* close handler will reconnect */ };
     ws.onclose = () => {
-      setConn("closed");
+      wsOpen = false; pubConnected = false; refreshConn();
       markStale();
       applyErrors([]);
       setTimeout(connect, reconnectMs);

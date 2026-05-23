@@ -12,7 +12,11 @@ npm install
 npm start
 ```
 
-Listens on `:8765` by default (`PORT=9000 npm start` to override).
+`127.0.0.1` is always bound so a same-machine analyzer can reach
+`ws://localhost:8765/ingest`. `HOSTS` (comma-separated) adds extra interfaces
+without exposing all of LAN; `HOST` is accepted as an alias. `npm start` sets
+`HOSTS=$(tailscale ip -4)` so the bridge is reachable over Tailscale too.
+Override port with `PORT=9000`.
 
 ## Endpoints
 
@@ -29,12 +33,11 @@ Open `http://localhost:8765/` in any browser to see the running timecode, the
 current error tags, and the last 10 continuity breaks. The page connects to
 `/subscribe` itself and auto-reconnects with 1 s → 10 s back-off.
 
-To view from a phone on the same Wi-Fi:
+To view from a phone over Tailscale:
 
 1. Start the bridge (`npm start`) and click **▶ PUBLISH** in the analyzer.
-2. Get the Mac's LAN IP: `ipconfig getifaddr en0` (or `en1` on Wi-Fi-only
-   machines).
-3. On the phone, open `http://<that-ip>:8765/`.
+2. Get the Mac's Tailscale IP: `tailscale ip -4`.
+3. On the phone (Tailscale connected), open `http://<that-ip>:8765/`.
 
 The viewer needs no audio input of its own — it's purely a readout of whatever
 the analyzer is currently publishing. Drop-frame rates render with `;` and an

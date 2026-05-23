@@ -11,6 +11,11 @@ import { dirname, join, normalize, extname } from "node:path";
 import { WebSocketServer } from "ws";
 
 const PORT = Number(process.env.PORT || 8765);
+// Always bind localhost so the same-machine analyzer works; HOSTS adds
+// extra interfaces (e.g. the Tailscale IP) without exposing all of LAN.
+const EXTRA_HOSTS = (process.env.HOSTS || process.env.HOST || "")
+  .split(",").map(s => s.trim()).filter(Boolean);
+const HOSTS = ["127.0.0.1", ...EXTRA_HOSTS.filter(h => h !== "127.0.0.1")];
 const PUBLIC_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "public");
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -47,7 +52,7 @@ async function serveStatic(req, res) {
   }
 }
 
-const server = http.createServer(async (req, res) => {
+async function handleRequest(req, res) {
   if (req.url === "/status") {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({
@@ -60,12 +65,12 @@ const server = http.createServer(async (req, res) => {
   }
   if (await serveStatic(req, res)) return;
   res.writeHead(404); res.end();
-});
+}
 
 const wssIngest = new WebSocketServer({ noServer: true });
 const wssSubscribe = new WebSocketServer({ noServer: true });
 
-server.on("upgrade", (req, socket, head) => {
+function handleUpgrade(req, socket, head) {
   const { url } = req;
   if (url === "/ingest") {
     wssIngest.handleUpgrade(req, socket, head, (ws) => wssIngest.emit("connection", ws, req));
@@ -74,6 +79,12 @@ server.on("upgrade", (req, socket, head) => {
   } else {
     socket.destroy();
   }
+}
+
+const servers = HOSTS.map((host) => {
+  const s = http.createServer(handleRequest);
+  s.on("upgrade", handleUpgrade);
+  return { host, server: s };
 });
 
 function broadcastStatus() {
@@ -122,10 +133,15 @@ wssSubscribe.on("connection", (ws, req) => {
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`smpte-bridge listening on :${PORT}`);
-  console.log(`  publish  →  ws://localhost:${PORT}/ingest`);
-  console.log(`  subscribe → ws://localhost:${PORT}/subscribe`);
-  console.log(`  status   →  http://localhost:${PORT}/status`);
-  console.log(`  viewer   →  http://localhost:${PORT}/`);
-});
+for (const { host, server } of servers) {
+  server.on("error", (err) => {
+    console.error(`[bridge] ${host}:${PORT} failed: ${err.message}`);
+  });
+  server.listen(PORT, host, () => {
+    console.log(`smpte-bridge listening on ${host}:${PORT}`);
+  });
+}
+console.log(`  publish   →  ws://<host>:${PORT}/ingest`);
+console.log(`  subscribe →  ws://<host>:${PORT}/subscribe`);
+console.log(`  status    →  http://<host>:${PORT}/status`);
+console.log(`  viewer    →  http://<host>:${PORT}/`);
