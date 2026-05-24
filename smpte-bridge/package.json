@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Fan-out sidecar for the SMPTE timecode analyzer. Ingests timecode from the browser over WebSocket and rebroadcasts to subscribers (Phase 1: WS only; OSC/Art-Net to follow).",
   "scripts": {
-    "start": "HOST=$(tailscale ip -4 | head -1) node src/index.js"
+    "start": "HOST=$(tailscale ip -4 | head -1) node src/index.js",
+    "build:icons": "node scripts/build-icons.mjs"
   },
   "dependencies": {
     "ws": "^8.18.0"
