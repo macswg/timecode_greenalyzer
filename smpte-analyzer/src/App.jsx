@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Publisher } from "./publisher";
 import { MultiRateDecoder, rateKeyToNominalFps } from "./ltcDecoder";
 
@@ -638,6 +638,7 @@ export default function SMPTEAnalyzer() {
   const peakDecayRef = useRef(-60);
   const lastErrSigRef = useRef("");
   const lastBreakTRef = useRef(0);
+  const [recentBreaks, setRecentBreaks] = useState([]);
   const sessionStartRef = useRef(Date.now());
   const publisherRef = useRef(null);
   const tickRef = useRef(null);
@@ -855,6 +856,16 @@ export default function SMPTEAnalyzer() {
     const lb = data.lastBreak;
     if (lb && lb.t !== lastBreakTRef.current) {
       lastBreakTRef.current = lb.t;
+      const snapshot = {
+        t: Date.now(),
+        type: lb.type,
+        delta: lb.delta,
+        from: lb.from,
+        to: lb.to,
+        snr: Number.isFinite(data.snr) ? data.snr : null,
+        levelDbFS: Number.isFinite(lvl) ? lvl : null,
+      };
+      setRecentBreaks(prev => [snapshot, ...prev].slice(0, 8));
       pushLog({
         t: Date.now(),
         tc: lb.to,
@@ -1764,6 +1775,49 @@ export default function SMPTEAnalyzer() {
                 );
               })()}
             </div>
+            {recentBreaks.length > 0 && (
+              <div style={{ marginTop:4 }}>
+                <div style={{ fontSize:10, color:"#555", letterSpacing:2, marginBottom:6, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                  <span>BREAK DETAIL · LAST {recentBreaks.length}</span>
+                  <button
+                    onClick={() => setRecentBreaks([])}
+                    style={{ background:"transparent", border:"1px solid #333", color:"#666", fontSize:9, letterSpacing:1, padding:"2px 6px", cursor:"pointer", fontFamily:"monospace" }}>
+                    CLEAR
+                  </button>
+                </div>
+                <div style={{ display:"grid", gridTemplateColumns:"auto auto 1fr auto auto", gap:"4px 10px", fontSize:11, fontFamily:"monospace", color:"#888" }}>
+                  <span style={{ color:"#444", letterSpacing:1 }}>AGE</span>
+                  <span style={{ color:"#444", letterSpacing:1 }}>TYPE</span>
+                  <span style={{ color:"#444", letterSpacing:1 }}>FROM → TO</span>
+                  <span style={{ color:"#444", letterSpacing:1, textAlign:"right" }}>SNR</span>
+                  <span style={{ color:"#444", letterSpacing:1, textAlign:"right" }}>LEVEL</span>
+                  {recentBreaks.map((b, i) => {
+                    const ageSec = (Date.now() - b.t) / 1000;
+                    const ageStr = ageSec < 60 ? `${ageSec.toFixed(0)}s` : `${Math.floor(ageSec/60)}m${Math.floor(ageSec%60).toString().padStart(2,"0")}s`;
+                    const typeColor = b.type === "REPEAT" ? "#22d3ee" : b.type === "REWIND" ? "#ff6600" : "#ffaa00";
+                    const sign = b.delta > 0 ? "+" : "";
+                    return (
+                      <React.Fragment key={`${b.t}-${i}`}>
+                        <span style={{ color:"#666" }}>{ageStr}</span>
+                        <span style={{ color:typeColor }}>{b.type} {sign}{b.delta}</span>
+                        <span style={{ color:"#888" }}>{b.from} → {b.to}</span>
+                        <span style={{ color: b.snr == null ? "#444" : b.snr < 10 ? "#ff6600" : "#888", textAlign:"right" }}>
+                          {b.snr == null ? "—" : `${b.snr.toFixed(1)}dB`}
+                        </span>
+                        <span style={{ color:"#888", textAlign:"right" }}>
+                          {b.levelDbFS == null ? "—" : `${b.levelDbFS.toFixed(1)}dBFS`}
+                        </span>
+                      </React.Fragment>
+                    );
+                  })}
+                </div>
+                <div style={{ fontSize:10, color:"#333", letterSpacing:1, marginTop:6, lineHeight:1.5 }}>
+                  REPEAT +0 / small JUMP at steady cadence → likely decoder edge case.
+                  Random JUMPs with SNR dip → real signal corruption.
+                  Large JUMP once → source seek / re-thread.
+                </div>
+              </div>
+            )}
             <div style={{ fontSize:10, color:"#333", letterSpacing:1, marginTop:4 }}>
               Auto-detecting from biphase bit rate (24 / 25 / 30 / 50 / 60 candidates run in parallel).
               NDF vs DF resolved from the frame's drop-frame flag.
