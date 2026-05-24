@@ -1933,6 +1933,10 @@ export default function SMPTEAnalyzer() {
       <div style={{ marginTop:12 }}>
         <SpecRefPanel />
       </div>
+
+      <div style={{ marginTop:16, padding:"10px 0", textAlign:"center", fontSize:10, fontFamily:"monospace", color:"#444", letterSpacing:1 }}>
+        v{__APP_VERSION__} · build {__GIT_COMMIT_COUNT__} · {__GIT_COMMIT__}
+      </div>
     </div>
   );
 }
