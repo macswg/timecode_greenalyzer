@@ -639,6 +639,12 @@ export default function SMPTEAnalyzer() {
   const peakHoldUntilRef = useRef(0);
   const lastErrSigRef = useRef("");
   const lastBreakTRef = useRef(0);
+  // Rolling 60 s window of recent continuity breaks (performance.now() timestamps).
+  // The decoder's `continuityBreaks` is a lifetime counter; for a long session
+  // (e.g. continuous playback across many songs, each cut producing a JUMP)
+  // the lifetime count is uninformative. The CONTINUITY readout uses this
+  // rolling count instead; the full history is still in the session log.
+  const recentBreakTimesRef = useRef([]);
   const sessionStartRef = useRef(Date.now());
   const publisherRef = useRef(null);
   const tickRef = useRef(null);
@@ -857,6 +863,7 @@ export default function SMPTEAnalyzer() {
     const lb = data.lastBreak;
     if (lb && lb.t !== lastBreakTRef.current) {
       lastBreakTRef.current = lb.t;
+      recentBreakTimesRef.current.push(lb.t);
       pushLog({
         t: Date.now(),
         tc: lb.to,
@@ -916,6 +923,8 @@ export default function SMPTEAnalyzer() {
     setPeakHold(-60);
     peakDecayRef.current = -60;
     peakHoldUntilRef.current = 0;
+    recentBreakTimesRef.current = [];
+    lastBreakTRef.current = 0;
   }, [useRealAudio]);
 
   // Attempt to start in live audio mode on first load. If the browser blocks
@@ -1759,15 +1768,19 @@ export default function SMPTEAnalyzer() {
                   </span>
                 );
               })()}
-              <span style={{ color:"#555", letterSpacing:2 }}>CONTINUITY</span>
+              <span style={{ color:"#555", letterSpacing:2 }}>CONTINUITY · 60s</span>
               {(() => {
-                const breaks = analysis?.continuityBreaks ?? 0;
+                const cutoff = performance.now() - 60000;
+                const arr = recentBreakTimesRef.current;
+                while (arr.length && arr[0] < cutoff) arr.shift();
+                const breaks = arr.length;
                 const last = analysis?.lastBreak;
+                const lastIsRecent = last && last.t >= cutoff;
                 if (breaks === 0) {
                   return <span style={{ color:"#00ff88" }}>● CONTINUOUS · 0 BREAKS</span>;
                 }
                 const sign = last?.delta > 0 ? "+" : "";
-                const detail = last
+                const detail = lastIsRecent
                   ? ` · last: ${last.type}${last.delta != null ? ` ${sign}${last.delta}` : ""} @ ${last.to}`
                   : "";
                 return (
