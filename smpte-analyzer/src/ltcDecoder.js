@@ -177,7 +177,14 @@ export class LtcDecoder {
 
 export function parseFrame(b) {
   const frUnits  = b[0]  | (b[1]<<1) | (b[2]<<2) | (b[3]<<3);
-  const frTens   = b[8]  | (b[9]<<1);
+  // Frame-tens field: standard LTC uses 2 bits (max FF=39, enough for ≤30
+  // fps). The high-frame-rate variant in SMPTE ST 12-1:2014 §6.6 repurposes
+  // bit 58 (formerly BGF) as a third frame-tens bit, expanding the field to
+  // 3 bits (max FF=79). We always read bit 58 as part of frame tens — at
+  // ≤30 cadences bit 58 stays 0 in any HFR-aware generator, and the
+  // analyzer doesn't surface binary group flags anyway, so there's no
+  // downside to always honouring it.
+  const frTens   = b[8]  | (b[9]<<1) | (b[58]<<2);
   const dropFrame = b[10] === 1;
   const colorFrame = b[11] === 1;
   const secUnits = b[16] | (b[17]<<1) | (b[18]<<2) | (b[19]<<3);
@@ -190,7 +197,7 @@ export function parseFrame(b) {
   const ss = secTens * 10 + secUnits;
   const mm = minTens * 10 + minUnits;
   const hh = hrTens * 10 + hrUnits;
-  if (ff > 59 || ss > 59 || mm > 59 || hh > 23) return null;
+  if (ff > 79 || ss > 59 || mm > 59 || hh > 23) return null;
   return { hh, mm, ss, ff, dropFrame, colorFrame };
 }
 

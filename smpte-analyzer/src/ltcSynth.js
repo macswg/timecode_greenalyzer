@@ -14,12 +14,16 @@ function writeLsbFirst(bits, start, value, nBits) {
 }
 
 // 80-bit LTC frame layout per SMPTE ST 12-1 Table 2. Mirrors parseFrame() in
-// ltcDecoder.js. User bits and binary group flags are all zero — we're
-// generating timecode only.
+// ltcDecoder.js. User bits are all zero — we're generating timecode only.
+// Frame tens uses bits 8, 9 (standard) plus bit 58 (HFR variant) for the MSB,
+// allowing FF up to 79 — required at 50/60-fps cadences. parseFrame always
+// reads bit 58 as part of frame tens so this stays consistent across all
+// generated rates.
 export function encodeFrameBits(hh, mm, ss, ff, dropFrame) {
   const bits = new Uint8Array(80);
+  const frTens = Math.floor(ff / 10);
   writeLsbFirst(bits, 0, ff % 10, 4);
-  writeLsbFirst(bits, 8, Math.floor(ff / 10), 2);
+  writeLsbFirst(bits, 8, frTens & 0b11, 2);
   bits[10] = dropFrame ? 1 : 0;
   bits[11] = 0;
   writeLsbFirst(bits, 16, ss % 10, 4);
@@ -28,6 +32,7 @@ export function encodeFrameBits(hh, mm, ss, ff, dropFrame) {
   writeLsbFirst(bits, 40, Math.floor(mm / 10), 3);
   writeLsbFirst(bits, 48, hh % 10, 4);
   writeLsbFirst(bits, 56, Math.floor(hh / 10), 2);
+  bits[58] = (frTens >> 2) & 1;
   for (let i = 0; i < 16; i++) bits[64 + i] = SYNC[i];
   return bits;
 }
