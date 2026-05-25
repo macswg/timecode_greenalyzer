@@ -844,6 +844,7 @@ export default function SMPTEAnalyzer() {
     // During the bootstrap window we don't yet know which mode to render —
     // skip the simulator so the user doesn't see a flash of wall-clock TC.
     if (bootstrapping) return;
+    const srcLabel = playingFile ? "file" : useRealAudio ? "live" : "sim";
     let lvl = levelDbFS;
     let nz = noiseLevel;
     let dp = dropoutProb;
@@ -1049,7 +1050,7 @@ export default function SMPTEAnalyzer() {
         errors: [...data.errors],
         levelDbFS: +lvl.toFixed(2),
         snr: Number.isFinite(data.snr) ? +data.snr.toFixed(1) : null,
-        source: useRealAudio ? "live" : "sim",
+        source: srcLabel,
         count: 1,
       };
       setSessionLog(prev => {
@@ -1114,7 +1115,7 @@ export default function SMPTEAnalyzer() {
           errors: ["LOCK_ACQUIRED"],
           levelDbFS: pl.levelDbFS,
           snr: pl.snr,
-          source: "live",
+          source: srcLabel,
         });
         pendingLockRef.current = null;
       }
@@ -1138,7 +1139,7 @@ export default function SMPTEAnalyzer() {
           errors: ["RATE_CHANGE", `none→${detRate}`],
           levelDbFS: +lvl.toFixed(2),
           snr: Number.isFinite(data.snr) ? +data.snr.toFixed(1) : null,
-          source: "live",
+          source: srcLabel,
         });
         lastLoggedRateRef.current = detRate;
         pendingRateRef.current = { rate: null, since: 0 };
@@ -1154,7 +1155,7 @@ export default function SMPTEAnalyzer() {
             errors: ["RATE_CHANGE", `${committed ?? "none"}→${detRate ?? "none"}`],
             levelDbFS: +lvl.toFixed(2),
             snr: Number.isFinite(data.snr) ? +data.snr.toFixed(1) : null,
-            source: "live",
+            source: srcLabel,
           });
           lastLoggedRateRef.current = detRate;
           pendingRateRef.current = { rate: null, since: 0 };
@@ -1185,7 +1186,7 @@ export default function SMPTEAnalyzer() {
         rate: data.detectedRateKey ?? fpsLabel,
         levelDbFS: +lvl.toFixed(2),
         snr: Number.isFinite(data.snr) ? +data.snr.toFixed(1) : null,
-        source: "live",
+        source: srcLabel,
       };
       if (ce.type === "MEASURING_COMMIT" || ce.type === "RATE_CHANGE") {
         pushLog({
@@ -1230,7 +1231,7 @@ export default function SMPTEAnalyzer() {
           ],
           levelDbFS: +lvl.toFixed(2),
           snr: Number.isFinite(data.snr) ? +data.snr.toFixed(1) : null,
-          source: "live",
+          source: srcLabel,
         });
       }
     }
@@ -1248,7 +1249,7 @@ export default function SMPTEAnalyzer() {
         errors: [`TC_${lb.type}`, `${lb.delta > 0 ? "+" : ""}${lb.delta}`],
         levelDbFS: +lvl.toFixed(2),
         snr: Number.isFinite(data.snr) ? +data.snr.toFixed(1) : null,
-        source: useRealAudio ? "live" : "sim",
+        source: srcLabel,
       });
       if (publisherRef.current) {
         publisherRef.current.send({
@@ -1270,7 +1271,7 @@ export default function SMPTEAnalyzer() {
         cadenceFps: data.cadence?.fps ?? null,
         cadenceDropFrame: data.cadence?.dropFrame ?? null,
         carrierCadenceMismatch: data.carrierCadenceMismatch ?? null,
-        source: useRealAudio ? "live" : "sim",
+        source: srcLabel,
         ltcLocked: useRealAudio ? !!data.ltcLocked : true,
         frameValid: data.frameValid !== false,
         levelDbFS: +lvl.toFixed(2),
@@ -1295,7 +1296,7 @@ export default function SMPTEAnalyzer() {
       peakDecayRef.current = Math.max(peakDecayRef.current - 0.67, data.peakDbFS);
     }
     setPeakHold(peakDecayRef.current);
-  }, [rateKey, levelDbFS, noiseLevel, dropoutProb, useRealAudio, bootstrapping]);
+  }, [rateKey, levelDbFS, noiseLevel, dropoutProb, useRealAudio, bootstrapping, playingFile]);
 
   useEffect(() => { tickRef.current = tick; }, [tick]);
 
@@ -2731,7 +2732,7 @@ export default function SMPTEAnalyzer() {
         <div style={{ maxHeight:220, overflowY:"auto", fontFamily:"monospace", fontSize:12 }}>
           {sessionLog.length === 0 ? (
             <div style={{ padding:16, color:"#333", textAlign:"center", letterSpacing:2, fontSize:11 }}>
-              NO EVENTS LOGGED — session clean since {new Date(sessionStartRef.current).toLocaleTimeString()}
+              NO EVENTS LOGGED — session clean since {new Date(sessionStartRef.current).toLocaleTimeString(undefined, { hour12: false })}
             </div>
           ) : (
             <table style={{ width:"100%", borderCollapse:"collapse" }}>
@@ -2750,7 +2751,7 @@ export default function SMPTEAnalyzer() {
               <tbody>
                 {[...sessionLog].reverse().map((e, i) => (
                   <tr key={sessionLog.length - i} style={{ borderTop:"1px solid #111", color:"#999" }}>
-                    <td style={{ padding:"3px 12px", color:"#555", textAlign:"left" }}>{new Date(e.t).toLocaleTimeString()}</td>
+                    <td style={{ padding:"3px 12px", color:"#555", textAlign:"left" }}>{new Date(e.t).toLocaleTimeString(undefined, { hour12: false })}</td>
                     <td style={{ padding:"3px 12px", color:"#00ff88", textAlign:"left" }}>
                       {e.from ? <>{e.from} <span style={{color:"#555"}}>→</span> {e.tc}</> : e.tc}
                     </td>
