@@ -703,6 +703,11 @@ export default function SMPTEAnalyzer() {
   // ~4 s window of {t, n} (wall-clock ms, cumulative samples).
   const sampleClockRef = useRef({ n: 0, marks: [] });
   const measuredRateEmaRef = useRef(null);
+  // Last detected carrier rate / cadence in live mode. Held across signal
+  // dropouts so the displayed label doesn't collapse to "DETECTING…" the
+  // moment code stops. Reset on mode switch or source teardown.
+  const lastSeenCarrierRef = useRef(null);
+  const lastSeenCadenceRef = useRef(null);
   const [measuredSampleRate, setMeasuredSampleRate] = useState(null);
   // The current device's reported native rate (track.getSettings().sampleRate).
   // Unlike the reused AudioContext's fixed rate, this updates per input.
@@ -1038,6 +1043,8 @@ export default function SMPTEAnalyzer() {
     peakHoldUntilRef.current = 0;
     recentBreakTimesRef.current = [];
     lastBreakTRef.current = 0;
+    lastSeenCarrierRef.current = null;
+    lastSeenCadenceRef.current = null;
   }, [useRealAudio]);
 
   // Attempt to start in live audio mode on first load. If the browser blocks
@@ -1190,6 +1197,8 @@ export default function SMPTEAnalyzer() {
       streamRef.current = null;
     }
     setSynthing(false);
+    lastSeenCarrierRef.current = null;
+    lastSeenCadenceRef.current = null;
   }
 
   async function startAudioCapture(deviceId) {
@@ -1593,12 +1602,25 @@ export default function SMPTEAnalyzer() {
             // wrap behaviour) are observed independently. In sim mode the
             // synthesized stream uses one consistent rate, so we just show
             // the selected SMPTE rate.
+            //
+            // Hold-last behaviour: once code has been detected, keep showing
+            // the most recent carrier+cadence even after the signal stops.
+            // Only show "DETECTING…" when nothing has ever been detected this
+            // session — otherwise the label collapses into "ND DETECTING…"
+            // smashed together the moment code drops.
+            if (liveMode && ltcLocked && analysis?.carrierRate) {
+              lastSeenCarrierRef.current = analysis.carrierRate;
+            }
+            if (liveMode && analysis?.cadence) {
+              lastSeenCadenceRef.current = analysis.cadence;
+            }
+            const haveEverDetected = lastSeenCarrierRef.current != null;
             const carrierKey = bootstrapping
               ? null
               : liveMode
-                ? (ltcLocked ? analysis?.carrierRate : null)
+                ? (ltcLocked ? analysis?.carrierRate : lastSeenCarrierRef.current)
                 : rateKey;
-            const cad = liveMode ? analysis?.cadence : null;
+            const cad = liveMode ? (analysis?.cadence ?? lastSeenCadenceRef.current) : null;
             const simIsDf = !liveMode && !!SMPTE_RATES[rateKey]?.dropFrame;
             const cadenceLabel = !liveMode
               ? (simIsDf ? "DF" : "ND")
@@ -1626,8 +1648,8 @@ export default function SMPTEAnalyzer() {
                   · {cadenceLabel}
                 </span>
               )}
-              {!bootstrapping && liveMode && (
-                <span style={{ fontSize:11, color:"#22d3ee", letterSpacing:3, marginLeft: ltcLocked ? 8 : 0 }}>
+              {!bootstrapping && liveMode && (ltcLocked || !haveEverDetected) && (
+                <span style={{ fontSize:11, color:"#22d3ee", letterSpacing:3, marginLeft: 8 }}>
                   {ltcLocked ? "DETECTED" : "DETECTING…"}
                 </span>
               )}
