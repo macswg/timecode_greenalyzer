@@ -630,6 +630,10 @@ export default function SMPTEAnalyzer() {
   // Tracks ltcLocked across ticks so we can log one entry per lock acquisition
   // (false → true transition). Records the starting timecode for the run.
   const lastLockedRef = useRef(false);
+  // Pending lock-acquisition entry: captured at the false→true transition,
+  // emitted only after the lock has been sustained for 5 s. Avoids logging
+  // momentary syncs on noisy/garbage signals.
+  const pendingLockRef = useRef(null);
   // Most recent worklet underrun: { t, gapMs, count } updated whenever the
   // audio thread reports a process()-call gap beyond ~2.5× the quantum.
   // Distinct from "no LTC signal" — the audio path itself was starved.
@@ -955,19 +959,34 @@ export default function SMPTEAnalyzer() {
     lastErrSigRef.current = sig;
 
     // Log lock acquisition (live mode only) so the session log records the
-    // starting timecode of each run.
+    // starting timecode of each run. The entry is captured at the false→true
+    // transition but only emitted after 5 s of sustained lock, so a brief
+    // sync on noise/garbage doesn't pollute the log.
     if (useRealAudio) {
       const nowLocked = !!data.ltcLocked;
       if (nowLocked && !lastLockedRef.current) {
-        pushLog({
-          t: Date.now(),
+        pendingLockRef.current = {
+          startT: Date.now(),
           tc: tcStr,
           rate: data.detectedRateKey ?? "—",
-          errors: ["LOCK_ACQUIRED"],
           levelDbFS: +lvl.toFixed(2),
           snr: Number.isFinite(data.snr) ? +data.snr.toFixed(1) : null,
+        };
+      } else if (!nowLocked && pendingLockRef.current) {
+        pendingLockRef.current = null;
+      }
+      const pl = pendingLockRef.current;
+      if (nowLocked && pl && Date.now() - pl.startT >= 5000) {
+        pushLog({
+          t: pl.startT,
+          tc: pl.tc,
+          rate: pl.rate,
+          errors: ["LOCK_ACQUIRED"],
+          levelDbFS: pl.levelDbFS,
+          snr: pl.snr,
           source: "live",
         });
+        pendingLockRef.current = null;
       }
       lastLockedRef.current = nowLocked;
     }
@@ -1070,6 +1089,7 @@ export default function SMPTEAnalyzer() {
     lastSeenCadenceRef.current = null;
     lastLoggedRateRef.current = null;
     lastLockedRef.current = false;
+    pendingLockRef.current = null;
   }, [useRealAudio]);
 
   // Attempt to start in live audio mode on first load. If the browser blocks
