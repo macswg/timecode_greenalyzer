@@ -571,7 +571,7 @@ function SpecRefPanel() {
         digital / genlocked source ≈ 0 ppm,
         free-running generator ±50–150 ppm (normal, chaseable).
         <br/><span style={{color:"#777"}}>Status thresholds:</span>{" "}
-        &lt;5 ppm LOCKED green, 5–500 OFFSET · OK TO CHASE cyan,
+        &lt;5 ppm LOCKED green, 5–500 OK TO CHASE cyan,
         &gt;500 CHECK RATE amber (large enough to imply a mis-detected rate).
       </div>
       <div style={{ marginTop:12, color:"#ff9900", letterSpacing:2, fontSize:13 }}>DROPOUT RATE (%)</div>
@@ -636,6 +636,10 @@ export default function SMPTEAnalyzer() {
   const sourceRef = useRef(null);
   const rafRef = useRef(null);
   const peakDecayRef = useRef(-60);
+  // Wall-clock time the current peak-hold value was latched. Re-latched only
+  // by a strictly higher peak; recurring peaks at the same level do not
+  // restart the hold — otherwise LTC's stable per-edge transients would
+  // pin the marker forever.
   const peakHoldUntilRef = useRef(0);
   const lastErrSigRef = useRef("");
   const lastBreakTRef = useRef(0);
@@ -900,15 +904,17 @@ export default function SMPTEAnalyzer() {
       });
     }
 
-    // Peak hold: latch on any new equal-or-higher peak and hold for 7 s,
-    // then decay fast (~30 dB/s) so a real drop in level becomes visible
-    // rather than the marker sitting pinned to a value the bar already shows.
+    // Peak-hold: latch on a strictly higher peak and hold for 10 s, then
+    // decay toward current at ~20 dB/s. Recurring peaks at or below the
+    // current hold do NOT reset the timer, so a stable signal whose edges
+    // occasionally hit the hold value still lets the marker eventually
+    // relax to the live level.
     const nowMs = performance.now();
-    if (data.peakDbFS >= peakDecayRef.current) {
+    if (data.peakDbFS > peakDecayRef.current) {
       peakDecayRef.current = data.peakDbFS;
-      peakHoldUntilRef.current = nowMs + 7000;
+      peakHoldUntilRef.current = nowMs + 10000;
     } else if (nowMs >= peakHoldUntilRef.current) {
-      peakDecayRef.current = Math.max(peakDecayRef.current - 1.0, data.peakDbFS);
+      peakDecayRef.current = Math.max(peakDecayRef.current - 0.67, data.peakDbFS);
     }
     setPeakHold(peakDecayRef.current);
   }, [rateKey, levelDbFS, noiseLevel, dropoutProb, useRealAudio, bootstrapping]);
@@ -1744,7 +1750,7 @@ export default function SMPTEAnalyzer() {
                 // rate (≈±500 ppm ≫ any real generator). What actually breaks
                 // a chase is continuity breaks + dropouts, reported separately.
                 const color = abs < 5 ? "#00ff88" : abs < 500 ? "#22d3ee" : "#ffaa00";
-                const status = abs < 5 ? "LOCKED" : abs < 500 ? "OFFSET · OK TO CHASE" : "CHECK RATE";
+                const status = abs < 5 ? "LOCKED" : abs < 500 ? "OK TO CHASE" : "CHECK RATE";
                 const sign = d > 0 ? "+" : d < 0 ? "−" : "";
                 return (
                   <span style={{ color }}>
