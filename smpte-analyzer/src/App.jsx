@@ -1482,7 +1482,7 @@ export default function SMPTEAnalyzer() {
             warn={true}
           />
         ))}
-        <div style={{ marginLeft:"auto", fontSize:11, fontFamily:"monospace", color:"#333", alignSelf:"center", letterSpacing:2 }}>
+        <div style={{ marginLeft:"auto", fontSize:11, fontFamily:"monospace", color: hasErrors ? "#ff3b3b" : "#00ff88", alignSelf:"center", letterSpacing:2 }}>
           {hasErrors ? `⚠ ${analysis.errors.join(" · ")} DETECTED` : "● ALL PARAMETERS NOMINAL"}
         </div>
       </div>
