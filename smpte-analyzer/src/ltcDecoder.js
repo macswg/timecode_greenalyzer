@@ -822,7 +822,7 @@ export class MultiRateDecoder {
     }
     if (cad.dropFrame && obs.fractional === false) {
       return { result: true, confidence: "high",
-        reason: `integer ${carrierNominalFps} fps carrier carrying DF count (non-conformant)` };
+        reason: `integer ${carrierNominalFps} fps carrier carrying DF count` };
     }
     return { result: false, confidence: "high", reason: null };
   }

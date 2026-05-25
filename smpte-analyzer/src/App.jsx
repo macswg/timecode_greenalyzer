@@ -397,12 +397,17 @@ function BitStreamView({ bits, bitErrors, locked }) {
             : isSync
               ? (bit ? "#22d3ee" : "#22d3ee33")
               : (bit ? "#00ff88" : "#00ff8822");
+          const isDfFlag = i === 10;
           return (
-            <div key={i} title={`bit ${i}${isSync ? " (sync)" : ""}: ${bit ?? "—"}`} style={{
+            <div key={i} title={`bit ${i}${isSync ? " (sync)" : ""}${isDfFlag ? " (DF flag)" : ""}: ${bit ?? "—"}`} style={{
               width:"100%", aspectRatio:"1", background:cellBg,
               border:`1px solid ${bit == null ? "#1a1a1a" : isSync ? "#22d3ee55" : "#00ff8833"}`,
               borderRadius:1,
-            }} />
+              display:"flex", alignItems:"center", justifyContent:"center",
+              fontFamily:"monospace", fontSize:9, fontWeight:"bold",
+              color: isDfFlag ? (bit ? "#000" : "#ffaa00") : "transparent",
+              lineHeight:1,
+            }}>{isDfFlag ? "D" : ""}</div>
           );
         })}
       </div>
@@ -456,6 +461,7 @@ function RateDetector({ rateKey, candidateStatus, confidence }) {
 }
 
 function SpecRefPanel() {
+  const para = { color:"#555", textAlign:"left", maxWidth:720, margin:"0 auto" };
   return (
     <div style={{
       border:"1px solid #1a1a1a",
@@ -481,7 +487,7 @@ function SpecRefPanel() {
       <div>Drop frame: skip fr 0,1 at min start</div>
       <div>Except every 10th minute</div>
       <div style={{ marginTop:12, color:"#ff9900", letterSpacing:2, fontSize:13 }}>SNR (dB)</div>
-      <div style={{ color:"#555" }}>
+      <div style={para}>
         Band-limited signal-to-noise ratio: total power in the LTC fundamentals
         band [0.4–1.6 × bitRate], divided by the noise-floor power projected
         across that same band width. The noise floor is sampled at biphase
@@ -501,7 +507,7 @@ function SpecRefPanel() {
         below ~30 dB are normal even for digitally pure sources.)
       </div>
       <div style={{ marginTop:12, color:"#ff9900", letterSpacing:2, fontSize:13 }}>THD (%)</div>
-      <div style={{ color:"#555" }}>
+      <div style={para}>
         Total Harmonic Distortion — √(ΣP<sub>h</sub>) / √(P<sub>1</sub>) × 100
         for the 3rd / 5th / 7th odd harmonics of the bit-rate-half fundamental.
         Because LTC is a near-square wave it has strong odd harmonics by
@@ -517,7 +523,7 @@ function SpecRefPanel() {
         ≤50% green, 50–70% orange, &gt;70% red.
       </div>
       <div style={{ marginTop:12, color:"#ff9900", letterSpacing:2, fontSize:13 }}>SAMPLE RATE</div>
-      <div style={{ color:"#555" }}>
+      <div style={para}>
         <span style={{color:"#777"}}>Live input —</span>{" "}
         <span style={{color:"#777"}}>measured</span> is the true sample-
         delivery rate counted from the capture worklet over wall-clock time
@@ -535,7 +541,7 @@ function SpecRefPanel() {
         because decodeAudioData resamples without exposing the source rate.
       </div>
       <div style={{ marginTop:12, color:"#ff9900", letterSpacing:2, fontSize:13 }}>CARRIER CLASSIFICATION</div>
-      <div style={{ color:"#555" }}>
+      <div style={para}>
         Decides whether the source's true carrier rate is the integer SMPTE
         rate (e.g. 30 fps) or its 1.001-divided NTSC sibling (29.97 fps).
         Measurement-grade, wall-clock-referenced: the worklet stamps
@@ -562,7 +568,7 @@ function SpecRefPanel() {
         classification is held for 5 s, then dropped back to MEASURING.
       </div>
       <div style={{ marginTop:12, color:"#ff9900", letterSpacing:2, fontSize:13 }}>CLOCK DRIFT (ppm)</div>
-      <div style={{ color:"#555" }}>
+      <div style={para}>
         Deviation of the source clock from the host machine's quartz,
         expressed in parts per million. Derived from the same wall-clock
         LSQ that drives carrier classification; EMA-smoothed for steadiness.
@@ -585,7 +591,7 @@ function SpecRefPanel() {
         ERROR. See AUDIT below.
       </div>
       <div style={{ marginTop:12, color:"#ff9900", letterSpacing:2, fontSize:13 }}>DROPOUT RATE (%)</div>
-      <div style={{ color:"#555" }}>
+      <div style={para}>
         Percentage of expected frames that weren't successfully decoded over a
         rolling 2-second window:
         100 × (1 − decoded_frames / (window_sec × detected_fps)).
@@ -593,8 +599,7 @@ function SpecRefPanel() {
         dropouts. EMA-smoothed.
         <br/><span style={{color:"#777"}}>Expected for LTC:</span>{" "}
         clean digital source &lt; 1% (every frame decoded),
-        analog tape with minor head wear 1–5%,
-        worn / damaged tape 5–20%,
+        signal degraded 5–20%,
         signal severely degraded &gt; 50%,
         no signal in window = 100%.
         <br/><span style={{color:"#777"}}>Status thresholds:</span>{" "}
@@ -602,7 +607,7 @@ function SpecRefPanel() {
         &gt;50% SEVERE red.
       </div>
       <div style={{ marginTop:12, color:"#ff9900", letterSpacing:2, fontSize:13 }}>CONTINUITY</div>
-      <div style={{ color:"#555" }}>
+      <div style={para}>
         Consecutive in-order LTC frames must differ by exactly one frame
         (with drop-frame rules applied at minute boundaries per ST 12-1 §7).
         Anything else is a continuity break:
@@ -624,7 +629,7 @@ function SpecRefPanel() {
         also broadcast over the API publisher as a `continuity` message.
       </div>
       <div style={{ marginTop:12, color:"#ff9900", letterSpacing:2, fontSize:13 }}>AUDIT PANEL</div>
-      <div style={{ color:"#555" }}>
+      <div style={para}>
         Collapsed by default under the LIVE INPUT STATUS readouts. Exposes
         the raw measurement numbers behind the carrier classification, so
         an engineer can audit the analyzer's conclusions instead of taking
@@ -2075,12 +2080,12 @@ export default function SMPTEAnalyzer() {
               )}
             </div>
             {mismatch && (
-              <div style={{ fontSize:10, color:"#ff3b3b", fontFamily:"monospace", letterSpacing:2 }}>
+              <div style={{ fontSize:10, color:"#ff3b3b", fontFamily:"monospace", letterSpacing:2, maxWidth:280, textAlign:"right", lineHeight:1.4 }}>
                 ⚠ NON-CONFORMANT: {mm.reason || `carrier ${analysis?.carrierRate} / cadence ${cad?.fps}${cad?.dropFrame ? " DF" : " ND"}`}
               </div>
             )}
             {liveMode && cad && cad.dfFlagMatches === false && (
-              <div style={{ fontSize:10, color:"#ffaa00", fontFamily:"monospace", letterSpacing:2 }}>
+              <div style={{ fontSize:10, color:"#ffaa00", fontFamily:"monospace", letterSpacing:2, maxWidth:280, textAlign:"right", lineHeight:1.4 }}>
                 ⚠ DF FLAG BIT DISAGREES WITH COUNT BEHAVIOUR
               </div>
             )}
