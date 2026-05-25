@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Publisher } from "./publisher";
 import { MultiRateDecoder, rateKeyToNominalFps, tcString } from "./ltcDecoder";
-import { framesToTc } from "./dropFrame";
+import { framesToTc, isValidDropFrame } from "./dropFrame";
 import { buildLtcAudioBuffer } from "./ltcSynth";
 
 // Carrier rates the synthesizer can emit. Independent of counting cadence.
@@ -282,7 +282,12 @@ function LevelMeter({ label, value, peak, min=-60, max=0 }) {
 
   return (
     <div className="level-meter" style={{ display:"flex", flexDirection:"column", gap:2 }}>
-      <div className="lm-label" style={{ fontSize:12, color:"#888", fontFamily:"monospace", letterSpacing:2 }}>{label}</div>
+      <div className="lm-header" style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline" }}>
+        <span className="lm-label" style={{ fontSize:12, color:"#888", fontFamily:"monospace", letterSpacing:2 }}>{label}</span>
+        <span className="lm-value" style={{ fontSize:12, color, fontFamily:"monospace" }}>
+          {value.toFixed(1)} dBFS
+        </span>
+      </div>
       <div className="lm-bar" style={{ position:"relative", height:14, background:"#0a0a0a", border:"1px solid #222", borderRadius:2 }}>
         {/* Colored fill */}
         <div style={{
@@ -314,9 +319,6 @@ function LevelMeter({ label, value, peak, min=-60, max=0 }) {
         {markers.filter((_,i)=>i%2===0).map(db => (
           <span key={db} style={{ position:"relative", left: db===-60?0:0 }}>{db}</span>
         ))}
-      </div>
-      <div className="lm-value" style={{ fontSize:13, color, fontFamily:"monospace", textAlign:"right" }}>
-        {value.toFixed(1)} dBFS
       </div>
     </div>
   );
@@ -411,52 +413,38 @@ function BitStreamView({ bits, bitErrors, locked }) {
   );
 }
 
-// In live mode `candidateStatus` is the per-candidate score array from the
-// MultiRateDecoder (real frames decoded / bit errors / lock state). Bars are
-// drawn from those scores: the active candidate ramps from 0 toward 100% as
-// it accumulates clean frames, while inactive candidates show how many
-// frames their (wrong-rate) decode produced before being rejected.
-// In sim mode `candidateStatus` is null and we fall back to a single-bar
-// view of the picked rate.
+// Shows just the currently detected rate as a single bar with its confidence
+// fill. Previously rendered one bar per candidate rate, but the unselected
+// bars carried no information once the winner was determined.
 function RateDetector({ rateKey, candidateStatus, confidence }) {
-  const allRates = Object.keys(SMPTE_RATES);
-  // Map candidate fps → status for quick lookup.
-  const byFps = new Map((candidateStatus || []).map(s => [s.fps, s]));
+  // Confidence for the active rate. In live mode derive from the winning
+  // candidate's frame count (60 frames ≈ 2 s of clean LTC → full). In sim
+  // mode the supplied `confidence` is the source of truth.
+  let pct = confidence;
+  if (candidateStatus && rateKey) {
+    const fps = rateKeyToNominalFps(rateKey);
+    const s = candidateStatus.find(c => c.fps === fps);
+    if (s) pct = Math.min(100, (s.framesDecoded ?? 0) * (100 / 60));
+  }
+  const label = rateKey ? (SMPTE_RATES[rateKey]?.label ?? rateKey) : "—";
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
-      <div style={{ fontSize:11, color:"#555", fontFamily:"monospace", letterSpacing:2, marginBottom:2 }}>RATE DETECTION</div>
-      {allRates.map(r => {
-        const active = r === rateKey;
-        let pct = 0;
-        if (candidateStatus) {
-          // Live: derive bar from the candidate decoder's real frame count.
-          // 60 frames ≈ 2 s of clean LTC → bar full.
-          const s = byFps.get(rateKeyToNominalFps(r));
-          const frames = s?.framesDecoded ?? 0;
-          pct = Math.min(100, frames * (100 / 60));
-        } else if (active) {
-          // Sim: only the picked rate has a meaningful confidence value.
-          pct = confidence;
-        }
-        const color = active ? "#00ff88" : pct > 5 ? "#3a3a3a" : "#222";
-        return (
-          <div key={r} style={{ display:"flex", alignItems:"center", gap:8, lineHeight:1.4 }}>
-            <span style={{ fontSize:13, fontFamily:"monospace", color: active ? "#00ff88" : "#333", width:80, lineHeight:1.4 }}>
-              {SMPTE_RATES[r].label}
-            </span>
-            <div style={{ flex:1, height:4, background:"#111", borderRadius:2 }}>
-              <div style={{
-                height:"100%", borderRadius:2,
-                width:`${pct}%`,
-                background: color,
-                boxShadow: active ? "0 0 6px #00ff8866" : "none",
-                transition:"width 0.3s",
-              }} />
-            </div>
-            {active && <span style={{ fontSize:10, color:"#00ff88", fontFamily:"monospace" }}>●</span>}
-          </div>
-        );
-      })}
+      <div style={{ fontSize:11, color:"#555", fontFamily:"monospace", letterSpacing:2, marginBottom:2 }}>DETECTED RATE</div>
+      <div style={{ display:"flex", alignItems:"center", gap:8, lineHeight:1.4 }}>
+        <span style={{ fontSize:13, fontFamily:"monospace", color:"#00ff88", width:80, lineHeight:1.4 }}>
+          {label}
+        </span>
+        <div style={{ flex:1, height:4, background:"#111", borderRadius:2 }}>
+          <div style={{
+            height:"100%", borderRadius:2,
+            width:`${pct}%`,
+            background:"#00ff88",
+            boxShadow:"0 0 6px #00ff8866",
+            transition:"width 0.3s",
+          }} />
+        </div>
+        <span style={{ fontSize:10, color:"#00ff88", fontFamily:"monospace" }}>●</span>
+      </div>
     </div>
   );
 }
@@ -610,7 +598,7 @@ export default function SMPTEAnalyzer() {
   const [peakHold, setPeakHold] = useState(-60);
   const [frameCount, setFrameCount] = useState(0);
   const [errorCount, setErrorCount] = useState(0);
-  const [errorCounts, setErrorCounts] = useState({ CLIP:0, HOT:0, LOW:0, DROPOUT:0, NOISE:0 });
+  const [errorCounts, setErrorCounts] = useState({ CLIP:0, HOT:0, LOW:0, DROPOUT:0, NOISE:0, DF_INVALID:0 });
   const [sessionLog, setSessionLog] = useState([]);
   const audioCtxRef = useRef(null);
   const analyserRef = useRef(null);
@@ -761,7 +749,13 @@ export default function SMPTEAnalyzer() {
     const effectiveRate = useRealAudio
       ? (decoderRef.current?.detectedRateKey() ?? rateKey)
       : rateKey;
-    const data = generateSimulatedAnalysis(effectiveRate, lvl, nz, dp);
+    // Sim path generates randomised tc/level/noise fields; live path overwrites
+    // those with real measurements, so calling the sim generator in live mode
+    // pollutes peakDbFS/etc. with random values that get overwritten on the
+    // next line. Build the minimal live skeleton directly when useRealAudio.
+    const data = useRealAudio
+      ? { rateKey: effectiveRate, dropFrame: false, colorFrame: false, errors: [] }
+      : generateSimulatedAnalysis(effectiveRate, lvl, nz, dp);
     if (useRealAudio) {
       // Live audio path: only show timecode the biphase decoder actually
       // produced from the incoming signal. If the last decoded frame is
@@ -775,7 +769,13 @@ export default function SMPTEAnalyzer() {
       // fundamentals) to energy outside it. With no signal locked, neither
       // metric is defined — leave them null so the gauges show "—".
       if (fresh && analyserRef.current && dec?.nominalFps) {
-        const m = computeLtcSpectralMetrics(analyserRef.current, sampleRateRef.current, dec.nominalFps);
+        // Use the detected actual fps (fractional for NTSC carriers) so the
+        // biphase spectral-null bins land on true nulls — at integer fps the
+        // 0.1% offset on 29.97/23.976/59.94 carriers slides the null sample
+        // point slightly toward an adjacent harmonic, biasing the noise floor.
+        const obs = dec.carrierObservation();
+        const actualFps = obs?.fractional ? obs.nominalFps / 1.001 : obs?.nominalFps ?? dec.nominalFps;
+        const m = computeLtcSpectralMetrics(analyserRef.current, sampleRateRef.current, actualFps);
         // Smooth the displayed gauges with a low-pass EMA so they don't
         // jitter ~30Hz with each tick. alpha = 0.025 → ~0.5 Hz effective
         // bandwidth; settles in roughly two seconds, very steady to read.
@@ -857,6 +857,15 @@ export default function SMPTEAnalyzer() {
       const hasSignal = lvl >= LEVEL_SPEC.SILENT_THRESHOLD || lastDecodeAge < 2000;
       if (lvl < LEVEL_SPEC.LOW_THRESHOLD && hasSignal) live.push("LOW");
       if (lvl < LEVEL_SPEC.SILENT_THRESHOLD && lastDecodeAge < 2000) live.push("DROPOUT");
+      // DF conformance: a frame asserting DF that lands on FF<dropPerMin at
+      // a non-tenth-minute boundary is the spec violation captured by
+      // isValidDropFrame. Only meaningful once cadence is known (so we can
+      // pick the right dropPerMin), and only when looking at a fresh frame.
+      const cadenceFps = data.cadence?.fps;
+      if (fresh && lf?.dropFrame && cadenceFps
+          && !isValidDropFrame(lf.hh, lf.mm, lf.ss, lf.ff, cadenceFps)) {
+        live.push("DF_INVALID");
+      }
       data.errors = live;
       data.frameValid = fresh && live.length === 0;
     }
@@ -1291,7 +1300,7 @@ export default function SMPTEAnalyzer() {
   function clearLog() {
     setSessionLog([]);
     setErrorCount(0);
-    setErrorCounts({ CLIP:0, HOT:0, LOW:0, DROPOUT:0, NOISE:0 });
+    setErrorCounts({ CLIP:0, HOT:0, LOW:0, DROPOUT:0, NOISE:0, DF_INVALID:0 });
     lastErrSigRef.current = "";
     currentSigTicksRef.current = 0;
     currentSigFlushTickRef.current = 0;
@@ -1622,11 +1631,11 @@ export default function SMPTEAnalyzer() {
 
       {/* Error Badges */}
       <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:16 }}>
-        {["CLIP","HOT","LOW","DROPOUT","NOISE"].map(e => (
+        {["CLIP","HOT","LOW","DROPOUT","NOISE","DF_INVALID"].map(e => (
           <StatusBadge
             key={e} label={e}
             active={analysis?.errors?.includes(e)}
-            color={e==="CLIP"?"#ff0000":e==="HOT"?"#ff6600":e==="LOW"?"#ff9900":e==="DROPOUT"?"#ff3399":"#cc88ff"}
+            color={e==="CLIP"?"#ff0000":e==="HOT"?"#ff6600":e==="LOW"?"#ff9900":e==="DROPOUT"?"#ff3399":e==="NOISE"?"#cc88ff":"#ffaa00"}
             warn={true}
             count={errorCounts[e]}
           />
