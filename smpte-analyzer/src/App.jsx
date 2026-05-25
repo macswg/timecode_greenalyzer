@@ -704,6 +704,13 @@ export default function SMPTEAnalyzer() {
   const splitterRef = useRef(null);
   const streamRef = useRef(null);
   const bufferSourceRef = useRef(null);
+  // Software-paced sample feeder for AudioBufferSource inputs (file / synth).
+  // See startPacedDecoderFeed() for the why.
+  const pacedFeederRef = useRef(null);
+  // Decoded AudioBuffer + sample-rate for the current file/synth, kept so we
+  // can re-extract a different channel and restart the paced feeder when the
+  // user switches input channels mid-playback.
+  const loadedBufferRef = useRef(null);
   const [playingFile, setPlayingFile] = useState(null); // { name, durationSec, loop }
   const [fileLoading, setFileLoading] = useState(false);
   const [fileDragOver, setFileDragOver] = useState(false);
@@ -1288,9 +1295,109 @@ export default function SMPTEAnalyzer() {
     return ctx;
   }
 
+  // Software-paced sample feeder for AudioBufferSource inputs.
+  //
+  // Why this exists: when an AudioBufferSourceNode plays into a headless graph
+  // (no node connected to ctx.destination — which we deliberately avoid on
+  // macOS to keep Core Audio from re-negotiating the system output device),
+  // Chrome renders the graph in deferred bursts rather than at strict real-
+  // time pacing. That means the worklet receives many chunks at once every
+  // ~250–300 ms instead of one chunk every ~42 ms. Cumulative decode counters
+  // still climb at the right average rate, but at any given UI tick the most
+  // recent decoded frame is usually >200 ms old, so the freshness check
+  // (App.jsx tick: `now - lastFrame.t < 200`) is false → ltcLocked false →
+  // "NO LTC SIGNAL" banner on a perfectly clean file.
+  //
+  // The MediaStreamSource path (live mic) is not affected: the input device's
+  // hardware clock drives the render thread at real time regardless of graph
+  // topology, so its worklet chunks arrive at strict ~42 ms cadence.
+  //
+  // Fix: for buffer-source inputs (file / synth), bypass the worklet for the
+  // decoder feed entirely. Schedule 2048-sample chunks with setTimeout at the
+  // sample-rate-derived cadence, stamping wall-clock times from
+  // performance.now(). The decoder receives a deterministic, real-time-paced
+  // stream identical in shape to what the worklet would produce for live mic.
+  // The audio graph (source → splitter → analyser) is still built for level/
+  // spectral meters, where bursty delivery is harmless.
+  function startPacedDecoderFeed({ samples, sampleRate, decoder, loop = true }) {
+    stopPacedDecoderFeed();
+    const CHUNK = 2048;
+    const chunkMs = (CHUNK / sampleRate) * 1000;
+    const total = samples.length;
+    if (total === 0) return;
+    const startWall = performance.now();
+    let readPos = 0;
+    let chunkIdx = 0;
+    const state = { stopped: false, timeoutId: null };
+    pacedFeederRef.current = state;
+
+    const tick = () => {
+      if (state.stopped) return;
+      // Build a CHUNK-sized window, wrapping the source buffer if looping.
+      let chunk;
+      if (readPos + CHUNK <= total) {
+        chunk = samples.subarray(readPos, readPos + CHUNK);
+        readPos += CHUNK;
+        if (readPos === total && loop) readPos = 0;
+      } else if (loop) {
+        const tail = total - readPos;
+        chunk = new Float32Array(CHUNK);
+        chunk.set(samples.subarray(readPos, total), 0);
+        const head = CHUNK - tail;
+        chunk.set(samples.subarray(0, head), tail);
+        readPos = head;
+      } else {
+        stopPacedDecoderFeed();
+        return;
+      }
+      // Stamp the chunk with its scheduled-arrival wall-clock span. Using the
+      // schedule (not performance.now() at tick time) keeps frame timestamps
+      // smooth even if setTimeout jitters by a few ms — the LSQ classifier
+      // sees ideal sample-rate-derived timing rather than scheduler noise.
+      const chunkStartWall = startWall + chunkIdx * chunkMs;
+      const chunkEndWall = chunkStartWall + chunkMs;
+      decoder.feed(chunk, sampleRate, chunkStartWall, chunkEndWall);
+      chunkIdx++;
+      const nextDeadline = startWall + chunkIdx * chunkMs;
+      const delay = Math.max(0, nextDeadline - performance.now());
+      state.timeoutId = setTimeout(tick, delay);
+    };
+    state.timeoutId = setTimeout(tick, 0);
+  }
+
+  function stopPacedDecoderFeed() {
+    const f = pacedFeederRef.current;
+    if (!f) return;
+    f.stopped = true;
+    if (f.timeoutId) clearTimeout(f.timeoutId);
+    pacedFeederRef.current = null;
+  }
+
+  // Wires a source node into the analyser only, on the shared AudioContext.
+  // Used for buffer-source inputs (file / synth) where the decoder is fed by
+  // the software-paced feeder instead of the worklet. Returns the analyser.
+  function wireSourceForAnalysis(ctx, source, channelCount) {
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 2048;
+    analyser.minDecibels = -120;
+    analyser.maxDecibels = 0;
+    analyser.smoothingTimeConstant = 0;
+    const nCh = Math.max(1, channelCount || source.channelCount || 1);
+    const ch = Math.min(Math.max(0, selectedChannelRef.current), nCh - 1);
+    selectedChannelRef.current = ch;
+    setInputChannelCount(nCh);
+    setSelectedChannel(ch);
+    const splitter = ctx.createChannelSplitter(nCh);
+    splitterRef.current = splitter;
+    source.connect(splitter);
+    splitter.connect(analyser, ch);
+    return analyser;
+  }
+
   // Wires a source node into a fresh analyser + worklet + decoder on the
   // shared AudioContext. Returns the new analyser and worklet so callers
-  // can stash them. Used by both the live-mic and file-playback paths.
+  // can stash them. Used by the live-mic path only — buffer-source inputs
+  // (file / synth) use wireSourceForAnalysis + startPacedDecoderFeed instead.
   function wireSourceToDecoder(ctx, source, channelCount) {
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 2048;
@@ -1361,10 +1468,24 @@ export default function SMPTEAnalyzer() {
     const sp = splitterRef.current;
     const an = analyserRef.current;
     const wk = workletNodeRef.current;
-    if (!sp || !an || !wk) return;
-    try { sp.disconnect(); } catch {}
-    sp.connect(an, idx);
-    sp.connect(wk, idx);
+    if (sp && an) {
+      try { sp.disconnect(); } catch {}
+      sp.connect(an, idx);
+      // Live-mic path also retaps the worklet; buffer-source paths have no
+      // worklet because the decoder is fed by the software-paced feeder.
+      if (wk) sp.connect(wk, idx);
+    }
+    // For buffer-source inputs (file / synth), restart the paced feeder on
+    // the newly-selected channel's samples so the decoder sees the right
+    // audio. The live-mic path doesn't need this — the worklet retap above
+    // already routes the chosen channel to the existing decoder.
+    const lb = loadedBufferRef.current;
+    const dec = decoderRef.current;
+    if (lb && dec && !wk) {
+      const chIdx = Math.min(idx, lb.audioBuffer.numberOfChannels - 1);
+      const channelSamples = lb.audioBuffer.getChannelData(chIdx);
+      startPacedDecoderFeed({ samples: channelSamples, sampleRate: lb.sampleRate, decoder: dec, loop: lb.loop });
+    }
     // The decoder self-heals on the new channel: with no fresh frames it
     // unlocks after ~200 ms and the windowed metrics decay on their own.
   }
@@ -1372,6 +1493,8 @@ export default function SMPTEAnalyzer() {
   // Tear down whatever source is currently feeding the decoder so a new one
   // can be wired up cleanly.
   function teardownCurrentSource() {
+    stopPacedDecoderFeed();
+    loadedBufferRef.current = null;
     if (bufferSourceRef.current) {
       try { bufferSourceRef.current.stop(); } catch {}
       try { bufferSourceRef.current.disconnect(); } catch {}
@@ -1456,12 +1579,22 @@ export default function SMPTEAnalyzer() {
       const source = ctx.createBufferSource();
       source.buffer = audioBuffer;
       source.loop = true;
-      const { analyser, worklet } = wireSourceToDecoder(ctx, source, audioBuffer.numberOfChannels);
+      const analyser = wireSourceForAnalysis(ctx, source, audioBuffer.numberOfChannels);
       source.start();
+
+      // Decoder is fed by the software-paced feeder, not the worklet —
+      // headless audio graphs deliver buffer-source samples in deferred
+      // bursts. See startPacedDecoderFeed() for the full rationale.
+      const decoder = new MultiRateDecoder();
+      decoderRef.current = decoder;
+      sampleClockRef.current = { n: 0, marks: [] };
+      measuredRateEmaRef.current = null;
+      loadedBufferRef.current = { audioBuffer, sampleRate: ctx.sampleRate, loop: true };
+      const channelSamples = audioBuffer.getChannelData(selectedChannelRef.current);
+      startPacedDecoderFeed({ samples: channelSamples, sampleRate: ctx.sampleRate, decoder, loop: true });
 
       bufferSourceRef.current = source;
       analyserRef.current = analyser;
-      workletNodeRef.current = worklet;
       setPlayingFile({
         name: file.name,
         durationSec: audioBuffer.duration,
@@ -1511,12 +1644,18 @@ export default function SMPTEAnalyzer() {
       const source = ctx.createBufferSource();
       source.buffer = audioBuffer;
       source.loop = true;
-      const { analyser, worklet } = wireSourceToDecoder(ctx, source, 1);
+      const analyser = wireSourceForAnalysis(ctx, source, 1);
       source.start();
+
+      const decoder = new MultiRateDecoder();
+      decoderRef.current = decoder;
+      sampleClockRef.current = { n: 0, marks: [] };
+      measuredRateEmaRef.current = null;
+      loadedBufferRef.current = { audioBuffer, sampleRate: ctx.sampleRate, loop: true };
+      startPacedDecoderFeed({ samples, sampleRate: ctx.sampleRate, decoder, loop: true });
 
       bufferSourceRef.current = source;
       analyserRef.current = analyser;
-      workletNodeRef.current = worklet;
       setUseRealAudio(true);
       setBootstrapping(false);
       setSynthing(true);

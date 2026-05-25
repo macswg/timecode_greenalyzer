@@ -314,6 +314,19 @@ export class MultiRateDecoder {
     this._pendingNominalFps = null;
     this._agreementCount = 0;
     this._lastAgreementT = 0;
+    // Divergence-hysteresis state — mirror of the commit agreement counter,
+    // applied to the 3 s detector window's signal that the committed side is
+    // wrong. The 3 s window's noise floor (σ ~60+ ppm) is high enough that a
+    // single 5σ excursion can fire on a stable borderline source whose true
+    // rate sits within ~1000 ppm of the midpoint. Requiring N consecutive
+    // same-side detector measurements ≥1 s apart (same shape as the commit
+    // rule) suppresses one-shot noise blips while still catching a real
+    // source rate change within ~3–5 s. _divergenceSide is the candidate
+    // wrong-side under accumulation; _divergenceCount is how many times
+    // we've seen it consecutively; _lastDivergenceT throttles the counter.
+    this._divergenceSide = null;
+    this._divergenceCount = 0;
+    this._lastDivergenceT = 0;
     // Signal-loss hold. _lastFreshT is the wall-clock time of the most recent
     // decoded frame (winner). When code stops, we keep showing the committed
     // classification for 5 s, then drop to MEASURING.
@@ -646,32 +659,63 @@ export class MultiRateDecoder {
       this._committedFractional = this._pendingFractional;
       this._committedNominalFps = this._pendingNominalFps;
       this._holdStartT = 0;
+      // Fresh commit resets the divergence counter — any prior wrong-side
+      // detector hits accumulated against the previous commit no longer apply.
+      this._divergenceSide = null;
+      this._divergenceCount = 0;
+      this._lastDivergenceT = 0;
     }
-    // Divergence: if we have a commit AND the 3 s detector window says, with
-    // ≥5σ confidence, that we're on the other side of the midpoint — drop the
-    // commit and re-measure. This is what makes the analyzer responsive to a
-    // real source change without waiting 20 s for the stable window to roll
-    // through. Disabled while signal is stale (handled by hold logic below).
+    // Divergence: if we have a commit AND the 3 s detector window has, with
+    // ≥5σ confidence and on N consecutive ≥1 s-apart measurements, reported
+    // the OTHER side of the midpoint — drop the commit and re-measure. The
+    // N-agreement requirement mirrors the commit rule and suppresses single-
+    // sample noise blips from the short window's higher σ floor, which would
+    // otherwise fire spuriously on borderline sources (true rate within ~1000
+    // ppm of midpoint). The trade-off: a genuine source rate change takes
+    // ~3–5 s to be confirmed instead of being acted on immediately. Disabled
+    // while signal is stale (handled by hold logic below).
     if (this._committedFractional != null && detector && fps === this._committedNominalFps) {
       const distFromMid = detector.ratio - MIDPOINT;
       const detectorSide = (Math.abs(distFromMid) >= SIGMA_GATE * detector.sigmaRatio)
         ? (distFromMid < 0) : null;
-      if (detectorSide != null && detectorSide !== this._committedFractional) {
+      const wrongSide = (detectorSide != null && detectorSide !== this._committedFractional);
+      if (!wrongSide) {
+        // Detector agrees with commit (or is uncertain) — reset hysteresis.
+        this._divergenceSide = null;
+        this._divergenceCount = 0;
+      } else if (detectorSide !== this._divergenceSide) {
+        // First wrong-side hit, or the wrong side changed (e.g. detector
+        // flapped). Start a fresh agreement run.
+        this._divergenceSide = detectorSide;
+        this._divergenceCount = 1;
+        this._lastDivergenceT = now;
+      } else if (now - this._lastDivergenceT >= AGREEMENT_MIN_INTERVAL_MS) {
+        this._divergenceCount++;
+        this._lastDivergenceT = now;
+      }
+      if (this._divergenceCount >= AGREEMENTS_REQUIRED) {
         this._lastEvent = {
           type: "DIVERGENCE", t: now,
           fps: this._committedNominalFps,
           committedFractional: this._committedFractional,
-          detectorFractional: detectorSide,
+          detectorFractional: this._divergenceSide,
           detectorFps: detector.fps,
           detectorSigmaFps: detector.sigmaFps,
         };
         this._committedFractional = null;
         this._committedNominalFps = null;
-        this._pendingFractional = detectorSide;
+        this._pendingFractional = this._divergenceSide;
         this._pendingNominalFps = fps;
         this._agreementCount = 1;
         this._lastAgreementT = now;
+        this._divergenceSide = null;
+        this._divergenceCount = 0;
       }
+    } else {
+      // No commit (or fps changed) — clear divergence counter so it doesn't
+      // straddle commit cycles.
+      this._divergenceSide = null;
+      this._divergenceCount = 0;
     }
     // Signal-loss hold. If the most recent frame is older than 500 ms, we're
     // in a stale state. Hold the committed classification for up to 5 s after
@@ -686,6 +730,8 @@ export class MultiRateDecoder {
         this._pendingNominalFps = null;
         this._agreementCount = 0;
         this._holdStartT = 0;
+        this._divergenceSide = null;
+        this._divergenceCount = 0;
       }
     } else if (!stale) {
       this._holdStartT = 0;
