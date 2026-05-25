@@ -160,10 +160,17 @@ Per **SMPTE ST 12-1 Table 2**, the 80-bit frame layout is:
 | 48–51 | Hours units (BCD) |
 | 52–55 | User bits group 7 |
 | 56–57 | Hours tens (BCD) |
-| 58 | Binary group flag BGF1 |
+| 58 | Binary group flag BGF1 — **or** frame-tens MSB in the HFR variant (see below) |
 | 59 | Binary group flag BGF2 |
 | 60–63 | User bits group 8 |
 | 64–79 | Sync word: `0011111111111101` |
+
+**High-frame-rate (HFR) variant.** The standard 2-bit frame-tens field only encodes FF values 0–39, which is enough for cadences up to 30. SMPTE ST 12-1:2014 §6.6 defines an HFR variant for 50/60-fps systems that repurposes bit 58 (formerly BGF1) as a third frame-tens bit, expanding the field to 3 bits so FF can reach 79.
+
+This analyzer always reads bit 58 as part of frame tens, in every decoded frame, regardless of detected rate. Caveats to be aware of:
+
+- A strictly-spec-conformant generator at a ≤30 cadence that uses binary group flags will mis-decode FF whenever BGF1 happens to be set. The analyzer does not surface binary group flag data anywhere, so the practical impact is limited, but it's a real departure from the standard variant.
+- Real-world HFR generators are not unanimous about which bit becomes the extra frame-tens MSB. Some vendors use bit 35 or bit 59 instead of bit 58. We follow ST 12-1:2014 (bit 58). A generator that uses a different bit will mis-decode at FF≥40; that's a per-vendor compatibility issue, not an analyzer bug.
 
 **Sync word** (bits 64–79): `0011111111111101`  
 This 16-bit pattern is unique — it cannot occur in valid BCD timecode data or in the biphase encoding of any other legal bit sequence, which allows the decoder to frame-align reliably.
