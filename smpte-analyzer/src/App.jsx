@@ -1,6 +1,30 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Publisher } from "./publisher";
 import { MultiRateDecoder, rateKeyToNominalFps } from "./ltcDecoder";
+import { buildLtcAudioBuffer } from "./ltcSynth";
+
+// Carrier rates the synthesizer can emit. Independent of counting cadence.
+const SYNTH_CARRIER_RATES = {
+  "23.976": 24000 / 1001,
+  "24":     24,
+  "25":     25,
+  "29.97":  30000 / 1001,
+  "30":     30,
+  "50":     50,
+  "59.94":  60000 / 1001,
+  "60":     60,
+};
+
+// Counting cadence options the synthesizer can emit.
+const SYNTH_CADENCES = {
+  "24":   { fps: 24, dropFrame: false, label: "24 ND" },
+  "25":   { fps: 25, dropFrame: false, label: "25 ND" },
+  "30":   { fps: 30, dropFrame: false, label: "30 ND" },
+  "30df": { fps: 30, dropFrame: true,  label: "30 DF" },
+  "50":   { fps: 50, dropFrame: false, label: "50 ND" },
+  "60":   { fps: 60, dropFrame: false, label: "60 ND" },
+  "60df": { fps: 60, dropFrame: true,  label: "60 DF" },
+};
 
 // ─── SMPTE Timecode Spec Constants ──────────────────────────────────────────
 // Per SMPTE ST 12-1:2014
@@ -708,6 +732,12 @@ export default function SMPTEAnalyzer() {
   const [playingFile, setPlayingFile] = useState(null); // { name, durationSec, loop }
   const [fileLoading, setFileLoading] = useState(false);
   const [fileDragOver, setFileDragOver] = useState(false);
+  // LTC synthesizer state. Carrier rate and counting cadence are independent
+  // knobs so the user can generate out-of-spec material (e.g. "30 DF") that
+  // exercises the carrier/cadence split.
+  const [synthCarrierKey, setSynthCarrierKey] = useState("30");
+  const [synthCadenceKey, setSynthCadenceKey] = useState("30df");
+  const [synthing, setSynthing] = useState(false);
 
   const LOG_CAP = 1000;
   function pushLog(entry) {
@@ -1155,6 +1185,7 @@ export default function SMPTEAnalyzer() {
       streamRef.current.getTracks().forEach(t => t.stop());
       streamRef.current = null;
     }
+    setSynthing(false);
   }
 
   async function startAudioCapture(deviceId) {
@@ -1245,6 +1276,55 @@ export default function SMPTEAnalyzer() {
       setFileLoading(false);
       setAudioError(`File decode failed: ${e.message || e}`);
     }
+  }
+
+  async function startSynthPlayback() {
+    try {
+      setAudioError(null);
+      const ctx = await getOrCreateAudioContext();
+      const carrierFps = SYNTH_CARRIER_RATES[synthCarrierKey];
+      const cad = SYNTH_CADENCES[synthCadenceKey];
+      // 120 s buffer crosses a non-tenth minute boundary at common cadences,
+      // so DF skip behaviour and minute-boundary cadence inference can be
+      // exercised. The buffer loops — every wrap is a continuity break event.
+      const samples = buildLtcAudioBuffer({
+        sampleRate: ctx.sampleRate,
+        carrierFps,
+        cadenceFps: cad.fps,
+        dropFrame: cad.dropFrame,
+        durationSec: 120,
+        levelDbFS,
+        start: { hh: 0, mm: 0, ss: 59, ff: 0 },
+      });
+      const audioBuffer = ctx.createBuffer(1, samples.length, ctx.sampleRate);
+      audioBuffer.copyToChannel(samples, 0);
+
+      teardownCurrentSource();
+      setCurrentDeviceId(null);
+      setCurrentDeviceLabel("");
+      setPlayingFile(null);
+
+      const source = ctx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.loop = true;
+      const { analyser, worklet } = wireSourceToDecoder(ctx, source, 1);
+      source.start();
+
+      bufferSourceRef.current = source;
+      analyserRef.current = analyser;
+      workletNodeRef.current = worklet;
+      setUseRealAudio(true);
+      setBootstrapping(false);
+      setSynthing(true);
+    } catch (e) {
+      console.error(e);
+      setAudioError(`Synth start failed: ${e.message || e}`);
+    }
+  }
+
+  function stopSynthPlayback() {
+    teardownCurrentSource();
+    setSynthing(false);
   }
 
   function clearLog() {
@@ -1817,6 +1897,19 @@ export default function SMPTEAnalyzer() {
           </div>
         ) : liveMode ? (
           <div style={{ ...PANEL, padding:14, display:"flex", flexDirection:"column", gap:14 }}>
+            {synthing && (
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8, padding:"6px 10px", background:"#3b9cff11", border:"1px solid #3b9cff44" }}>
+                <div style={{ fontSize:10, color:"#3b9cff", letterSpacing:2, fontFamily:"monospace" }}>
+                  ▶ SYNTH · CARRIER {synthCarrierKey} · CADENCE {SYNTH_CADENCES[synthCadenceKey].label}
+                </div>
+                <button
+                  onClick={stopSynthPlayback}
+                  style={{ padding:"3px 10px", background:"#ff333322", color:"#ff6666", border:"1px solid #ff333366", letterSpacing:2, fontSize:10, cursor:"pointer" }}
+                >
+                  ■ STOP
+                </button>
+              </div>
+            )}
             <div style={{ fontSize:11, color:"#22d3ee", letterSpacing:3, marginBottom:4 }}>LIVE INPUT STATUS</div>
             <div style={{ display:"grid", gridTemplateColumns:"auto 1fr", gap:"10px 18px", fontSize:13, fontFamily:"monospace" }}>
               <span style={{ color:"#555", letterSpacing:2 }}>DETECTED RATE</span>
@@ -1976,6 +2069,78 @@ export default function SMPTEAnalyzer() {
             </div>
             <input type="range" min={0} max={0.5} step={0.005}
               value={dropoutProb} onChange={e => setDropoutProb(+e.target.value)} />
+          </div>
+
+          {/* LTC synthesizer: generates real biphase audio fed through the
+              decoder, so the carrier/cadence split can be exercised end-to-end
+              with mismatched settings (e.g. 30 carrier + 30 DF cadence). */}
+          <div style={{ borderTop:"1px solid #1a1a1a", paddingTop:12, marginTop:4 }}>
+            <div style={{ fontSize:11, color:"#ff9900", letterSpacing:3, marginBottom:8 }}>SYNTHESIZE LTC AUDIO</div>
+            <div style={{ fontSize:10, color:"#555", marginBottom:10, lineHeight:1.5 }}>
+              Generates real LTC audio through the decoder.
+              Carrier rate = bit-clock timing. Cadence = how the count wraps + DF skip.
+              Pick mismatched values to trigger the new warnings.
+            </div>
+            <div style={{ display:"flex", flexDirection:"column", gap:8, marginBottom:10 }}>
+              <div>
+                <div style={{ fontSize:11, color:"#555", letterSpacing:2, marginBottom:4 }}>
+                  CARRIER RATE <span style={{color:"#3b9cff"}}>{synthCarrierKey}</span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={Object.keys(SYNTH_CARRIER_RATES).length - 1}
+                  step={1}
+                  value={Object.keys(SYNTH_CARRIER_RATES).indexOf(synthCarrierKey)}
+                  onChange={e => setSynthCarrierKey(Object.keys(SYNTH_CARRIER_RATES)[+e.target.value])}
+                  style={{ width:"100%" }}
+                />
+                <div style={{ display:"flex", justifyContent:"space-between", fontSize:9, color:"#333", marginTop:2 }}>
+                  {Object.keys(SYNTH_CARRIER_RATES).map(k => (
+                    <span key={k} style={{ color: k === synthCarrierKey ? "#3b9cff" : "#333" }}>{k}</span>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize:11, color:"#555", letterSpacing:2, marginBottom:4 }}>COUNTING CADENCE</div>
+                <select
+                  value={synthCadenceKey}
+                  onChange={e => setSynthCadenceKey(e.target.value)}
+                  style={{ width:"100%" }}
+                >
+                  {Object.entries(SYNTH_CADENCES).map(([k, v]) => (
+                    <option key={k} value={k}>{v.label}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            {(() => {
+              const carrierFps = SYNTH_CARRIER_RATES[synthCarrierKey];
+              const cad = SYNTH_CADENCES[synthCadenceKey];
+              const carrierNomInt = Math.round(carrierFps);
+              const fractional = Math.abs(carrierFps - carrierNomInt) > 0.01;
+              const mismatch = carrierNomInt !== cad.fps || (cad.dropFrame && !fractional && (carrierNomInt === 30 || carrierNomInt === 60));
+              return (
+                <div style={{ fontSize:10, color: mismatch ? "#ff6600" : "#444", fontFamily:"monospace", marginBottom:10, letterSpacing:1 }}>
+                  {mismatch ? "⚠ OUT-OF-SPEC — should trigger mismatch warning" : "✓ spec-conformant — carrier and cadence agree"}
+                </div>
+              );
+            })()}
+            {!synthing ? (
+              <button
+                onClick={startSynthPlayback}
+                style={{ width:"100%", padding:"8px 12px", background:"#00ff8822", color:"#00ff88", border:"1px solid #00ff8866", letterSpacing:2, fontSize:11, cursor:"pointer" }}
+              >
+                ▶ START LTC SYNTH
+              </button>
+            ) : (
+              <button
+                onClick={stopSynthPlayback}
+                style={{ width:"100%", padding:"8px 12px", background:"#ff333322", color:"#ff6666", border:"1px solid #ff333366", letterSpacing:2, fontSize:11, cursor:"pointer" }}
+              >
+                ■ STOP LTC SYNTH
+              </button>
+            )}
           </div>
         </div>
         )}
