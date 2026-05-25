@@ -252,6 +252,14 @@ export class MultiRateDecoder {
     // Carrier observation cached across getter calls; invalidated whenever
     // new samples arrive (a new feed() can shift winner / medianSpan).
     this._carrierObs = null;
+    // Hysteresis state for the fractional/integer carrier classification. The
+    // raw threshold sits at 1.0005× expected span — exactly halfway between
+    // integer (1.000) and 1.001-divided rates. With only 120 frames of
+    // integer-sample spans (~4 s) the mean wobbles enough to flip across the
+    // midpoint on a clean 29.97 source. We remember the last decision and
+    // require the ratio to cross a wider band before flipping.
+    this._lastFractional = null;     // null | true | false
+    this._lastFractionalFps = null;  // nominalFps the decision belongs to
   }
 
   feed(samples, sampleRate) {
@@ -414,7 +422,23 @@ export class MultiRateDecoder {
       fractional = false;
     } else if ((fps === 24 || fps === 30 || fps === 60) && winner && meanSpan != null) {
       const expected = 79 * winner.dec.samplesPerBit;
-      fractional = (meanSpan / expected) >= 1.0005;
+      const ratio = meanSpan / expected;
+      // Asymmetric thresholds around 1.0005 give a deadband: once classified,
+      // the ratio has to swing past the *opposite* threshold to flip. The band
+      // ±0.0002 around 1.0005 corresponds to ±0.32 samples at 48 kHz / 30 fps
+      // — wider than the wobble we see on the 120-frame mean, but well inside
+      // the 1.6-sample gap between integer 30 and 29.97 actuals.
+      const ENTER_FRACTIONAL = 1.0007;
+      const EXIT_FRACTIONAL = 1.0003;
+      const prev = (this._lastFractionalFps === fps) ? this._lastFractional : null;
+      if (prev === true) fractional = (ratio >= EXIT_FRACTIONAL);
+      else if (prev === false) fractional = (ratio >= ENTER_FRACTIONAL);
+      else fractional = (ratio >= 1.0005);  // first decision: use the midpoint
+      this._lastFractional = fractional;
+      this._lastFractionalFps = fps;
+    } else {
+      // No winner or insufficient spans — leave hysteresis state alone so a
+      // brief signal dropout doesn't reset the classification.
     }
     let carrierRate = null;
     if (fps === 25) carrierRate = "25";

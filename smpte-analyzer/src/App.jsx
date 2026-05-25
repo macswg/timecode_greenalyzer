@@ -627,6 +627,13 @@ export default function SMPTEAnalyzer() {
   // Most recently logged detected rate key, so we only push a log entry on
   // transitions (e.g. 29.97df → 30 carrier flip) rather than every tick.
   const lastLoggedRateRef = useRef(null);
+  // Debounce for RATE_CHANGE logging. A candidate rate must persist for
+  // PENDING_MS before it gets logged; if it flips back to the committed rate
+  // before then, no entry is written. Hysteresis in the carrier classifier
+  // (ltcDecoder.js carrierObservation) handles the underlying wobble; this is
+  // the second layer that keeps the session log readable when a transition
+  // does happen and briefly flickers.
+  const pendingRateRef = useRef({ rate: null, since: 0 });
   // Tracks ltcLocked across ticks so we can log one entry per lock acquisition
   // (false → true transition). Records the starting timecode for the run.
   const lastLockedRef = useRef(false);
@@ -703,6 +710,18 @@ export default function SMPTEAnalyzer() {
   const [synthing, setSynthing] = useState(false);
 
   const LOG_CAP = 1000;
+  // Session-log entries fall into two classes by their leading tag:
+  //   info  — operational events that aren't problems (lock acquired, rate
+  //           detected). Rendered green.
+  //   error — actual problems (level, decode, continuity). Rendered red.
+  // Continuity breaks use `TC_<TYPE>` so we match by prefix as well.
+  const INFO_TAGS = new Set(["LOCK_ACQUIRED"]);
+  function logEntryClass(e) {
+    const lead = e.errors?.[0];
+    if (lead && INFO_TAGS.has(lead)) return "info";
+    return "error";
+  }
+
   function pushLog(entry) {
     setSessionLog(prev => {
       const next = prev.length >= LOG_CAP ? prev.slice(prev.length - LOG_CAP + 1) : prev;
@@ -997,18 +1016,43 @@ export default function SMPTEAnalyzer() {
     // a transition from null → rateKey.
     if (useRealAudio) {
       const detRate = data.detectedRateKey ?? null;
-      if (detRate !== lastLoggedRateRef.current) {
-        const from = lastLoggedRateRef.current;
+      const committed = lastLoggedRateRef.current;
+      const PENDING_MS = 1500;
+      // First lock (no committed rate yet): log immediately so the user gets
+      // an initial RATE_CHANGE entry from none → detected.
+      if (committed === null && detRate !== null) {
         pushLog({
           t: Date.now(),
           tc: tcStr,
-          rate: detRate ?? "—",
-          errors: ["RATE_CHANGE", `${from ?? "none"}→${detRate ?? "none"}`],
+          rate: detRate,
+          errors: ["RATE_CHANGE", `none→${detRate}`],
           levelDbFS: +lvl.toFixed(2),
           snr: Number.isFinite(data.snr) ? +data.snr.toFixed(1) : null,
           source: "live",
         });
         lastLoggedRateRef.current = detRate;
+        pendingRateRef.current = { rate: null, since: 0 };
+      } else if (detRate !== committed) {
+        const pr = pendingRateRef.current;
+        if (pr.rate !== detRate) {
+          pendingRateRef.current = { rate: detRate, since: Date.now() };
+        } else if (pr.rate !== null && Date.now() - pr.since >= PENDING_MS) {
+          pushLog({
+            t: Date.now(),
+            tc: tcStr,
+            rate: detRate ?? "—",
+            errors: ["RATE_CHANGE", `${committed ?? "none"}→${detRate ?? "none"}`],
+            levelDbFS: +lvl.toFixed(2),
+            snr: Number.isFinite(data.snr) ? +data.snr.toFixed(1) : null,
+            source: "live",
+          });
+          lastLoggedRateRef.current = detRate;
+          pendingRateRef.current = { rate: null, since: 0 };
+        }
+      } else if (pendingRateRef.current.rate !== null) {
+        // detRate snapped back to the committed value before the debounce
+        // window elapsed — discard the pending change.
+        pendingRateRef.current = { rate: null, since: 0 };
       }
     }
 
@@ -1089,6 +1133,7 @@ export default function SMPTEAnalyzer() {
     lastSeenCarrierRef.current = null;
     lastSeenCadenceRef.current = null;
     lastLoggedRateRef.current = null;
+    pendingRateRef.current = { rate: null, since: 0 };
     lastLockedRef.current = false;
     pendingLockRef.current = null;
   }, [useRealAudio]);
@@ -2290,7 +2335,7 @@ export default function SMPTEAnalyzer() {
         <div style={{ maxHeight:220, overflowY:"auto", fontFamily:"monospace", fontSize:12 }}>
           {sessionLog.length === 0 ? (
             <div style={{ padding:16, color:"#333", textAlign:"center", letterSpacing:2, fontSize:11 }}>
-              NO ERRORS LOGGED — session clean since {new Date(sessionStartRef.current).toLocaleTimeString()}
+              NO EVENTS LOGGED — session clean since {new Date(sessionStartRef.current).toLocaleTimeString()}
             </div>
           ) : (
             <table style={{ width:"100%", borderCollapse:"collapse" }}>
@@ -2302,7 +2347,7 @@ export default function SMPTEAnalyzer() {
                   <th style={{ padding:"4px 12px", fontWeight:"normal", textAlign:"left" }}>SRC</th>
                   <th style={{ padding:"4px 12px", fontWeight:"normal", textAlign:"right" }}>LEVEL</th>
                   <th style={{ padding:"4px 12px", fontWeight:"normal", textAlign:"right" }}>SNR</th>
-                  <th style={{ padding:"4px 12px", fontWeight:"normal", textAlign:"left" }}>ERRORS</th>
+                  <th style={{ padding:"4px 12px", fontWeight:"normal", textAlign:"left" }}>EVENT</th>
                   <th style={{ padding:"4px 12px", fontWeight:"normal", textAlign:"right" }}>COUNT</th>
                 </tr>
               </thead>
@@ -2319,7 +2364,7 @@ export default function SMPTEAnalyzer() {
                     <td style={{ padding:"3px 12px", color: e.snr == null ? "#333" : e.snr < 10 ? "#ff6600" : "#888", textAlign:"right" }}>
                       {e.snr == null ? "—" : `${e.snr.toFixed(1)} dB`}
                     </td>
-                    <td style={{ padding:"3px 12px", color:"#ff3b3b", textAlign:"left" }}>{e.errors.join(" · ")}</td>
+                    <td style={{ padding:"3px 12px", color: logEntryClass(e) === "info" ? "#00ff88" : "#ff3b3b", textAlign:"left" }}>{e.errors.join(" · ")}</td>
                     <td style={{ padding:"3px 12px", color:"#888", textAlign:"right" }}>{e.count > 1 ? `×${e.count}` : ""}</td>
                   </tr>
                 ))}
