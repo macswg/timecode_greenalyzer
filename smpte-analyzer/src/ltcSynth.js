@@ -95,7 +95,12 @@ function biphaseEncode(bits, samplesPerBit, amplitude) {
 //                 the decoder will only lock when within ±3% of one of its
 //                 candidate rates (24/25/30/50/60).
 //   cadenceFps:   counting wrap value (24/25/30/50/60).
-//   dropFrame:    apply DF skip at minute boundaries.
+//   dropFrame:    apply DF skip at minute boundaries (count behaviour).
+//   dfFlag:       value to write into bit 10 of every frame. Defaults to
+//                 `dropFrame` for spec-conformant output. Pass an explicit
+//                 boolean to force a mismatch (e.g. DF skip enabled but flag
+//                 cleared, or NDF count with flag asserted) so the
+//                 dfFlagMatchesObservedCadence check can be exercised.
 //   durationSec:  total buffer length.
 //   levelDbFS:    output level. -18 is SMPTE nominal.
 //   start:        { hh, mm, ss, ff } starting timecode.
@@ -104,17 +109,19 @@ export function buildLtcAudioBuffer({
   carrierFps,
   cadenceFps,
   dropFrame,
+  dfFlag,
   durationSec = 120,
   levelDbFS = -18,
   start = { hh: 0, mm: 0, ss: 0, ff: 0 },
 }) {
+  const flagBit = dfFlag == null ? dropFrame : dfFlag;
   const samplesPerBit = sampleRate / (carrierFps * 80);
   const frameCount = Math.floor(durationSec * carrierFps);
   const totalBits = frameCount * 80;
   const allBits = new Uint8Array(totalBits);
   let { hh, mm, ss, ff } = start;
   for (let f = 0; f < frameCount; f++) {
-    const frameBits = encodeFrameBits(hh, mm, ss, ff, dropFrame);
+    const frameBits = encodeFrameBits(hh, mm, ss, ff, flagBit);
     allBits.set(frameBits, f * 80);
     const next = nextTc(hh, mm, ss, ff, cadenceFps, dropFrame);
     hh = next.hh; mm = next.mm; ss = next.ss; ff = next.ff;

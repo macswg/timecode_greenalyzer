@@ -737,6 +737,10 @@ export default function SMPTEAnalyzer() {
   // exercises the carrier/cadence split.
   const [synthCarrierKey, setSynthCarrierKey] = useState("30");
   const [synthCadenceKey, setSynthCadenceKey] = useState("30df");
+  // DF flag bit (frame bit 10) override. "auto" = match the cadence's DF
+  // behaviour (spec-conformant). "on"/"off" force the flag independent of the
+  // count, so dfFlagMatchesObservedCadence() can be exercised.
+  const [synthDfFlagKey, setSynthDfFlagKey] = useState("auto");
   const [synthing, setSynthing] = useState(false);
 
   const LOG_CAP = 1000;
@@ -1287,11 +1291,14 @@ export default function SMPTEAnalyzer() {
       // 120 s buffer crosses a non-tenth minute boundary at common cadences,
       // so DF skip behaviour and minute-boundary cadence inference can be
       // exercised. The buffer loops — every wrap is a continuity break event.
+      const dfFlag = synthDfFlagKey === "auto" ? cad.dropFrame
+                   : synthDfFlagKey === "on";
       const samples = buildLtcAudioBuffer({
         sampleRate: ctx.sampleRate,
         carrierFps,
         cadenceFps: cad.fps,
         dropFrame: cad.dropFrame,
+        dfFlag,
         durationSec: 120,
         levelDbFS,
         start: { hh: 0, mm: 0, ss: 59, ff: 0 },
@@ -1912,10 +1919,6 @@ export default function SMPTEAnalyzer() {
             )}
             <div style={{ fontSize:11, color:"#22d3ee", letterSpacing:3, marginBottom:4 }}>LIVE INPUT STATUS</div>
             <div style={{ display:"grid", gridTemplateColumns:"auto 1fr", gap:"10px 18px", fontSize:13, fontFamily:"monospace" }}>
-              <span style={{ color:"#555", letterSpacing:2 }}>DETECTED RATE</span>
-              <span style={{ color: analysis?.detectedRateKey ? "#22d3ee" : "#666" }}>
-                {analysis?.detectedRateKey ? SMPTE_RATES[analysis.detectedRateKey].label : "— detecting —"}
-              </span>
               <span style={{ color:"#555", letterSpacing:2 }}>LOCK STATE</span>
               <span style={{ color: ltcLocked ? "#00ff88" : "#888" }}>
                 {ltcLocked ? "● LOCKED" : "○ NO SIGNAL"}
@@ -2027,8 +2030,8 @@ export default function SMPTEAnalyzer() {
             </div>
           </div>
         ) : (
-        <div style={{ ...PANEL, padding:14, display:"flex", flexDirection:"column", gap:14 }}>
-          <div style={{ fontSize:11, color:"#ff9900", letterSpacing:3, marginBottom:4 }}>SIMULATION CONTROLS</div>
+        <div style={{ ...PANEL, padding:14, display:"flex", flexDirection:"column", gap:14, border:"1px solid #c084fc", boxShadow:"0 0 12px rgba(192,132,252,0.35)" }}>
+          <div style={{ fontSize:11, color:"#c084fc", letterSpacing:3, marginBottom:4 }}>SIMULATION CONTROLS</div>
 
           <div>
             <div style={{ fontSize:11, color:"#555", letterSpacing:2, marginBottom:8 }}>FRAME RATE</div>
@@ -2095,11 +2098,29 @@ export default function SMPTEAnalyzer() {
                   onChange={e => setSynthCarrierKey(Object.keys(SYNTH_CARRIER_RATES)[+e.target.value])}
                   style={{ width:"100%" }}
                 />
-                <div style={{ display:"flex", justifyContent:"space-between", fontSize:9, color:"#333", marginTop:2 }}>
-                  {Object.keys(SYNTH_CARRIER_RATES).map(k => (
-                    <span key={k} style={{ color: k === synthCarrierKey ? "#3b9cff" : "#333" }}>{k}</span>
-                  ))}
-                </div>
+                {(() => {
+                  // Native range thumb sits with its center at thumbRadius
+                  // from the input edges, so labels using space-between on a
+                  // 100%-wide container land outside the actual thumb travel.
+                  // Position each label centered at its corresponding stop,
+                  // inset by the thumb radius from each side of the track.
+                  const keys = Object.keys(SYNTH_CARRIER_RATES);
+                  const thumbRadius = 8;
+                  return (
+                    <div style={{ position:"relative", height:14, marginTop:2, marginLeft:thumbRadius, marginRight:thumbRadius }}>
+                      {keys.map((k, i) => (
+                        <span key={k} style={{
+                          position:"absolute",
+                          left:`${(i / (keys.length - 1)) * 100}%`,
+                          transform:"translateX(-50%)",
+                          fontSize:9,
+                          color: k === synthCarrierKey ? "#3b9cff" : "#333",
+                          whiteSpace:"nowrap",
+                        }}>{k}</span>
+                      ))}
+                    </div>
+                  );
+                })()}
               </div>
               <div>
                 <div style={{ fontSize:11, color:"#555", letterSpacing:2, marginBottom:4 }}>COUNTING CADENCE</div>
@@ -2113,16 +2134,36 @@ export default function SMPTEAnalyzer() {
                   ))}
                 </select>
               </div>
+              <div>
+                <div style={{ fontSize:11, color:"#555", letterSpacing:2, marginBottom:4 }}>DF FLAG BIT (frame bit 10)</div>
+                <select
+                  value={synthDfFlagKey}
+                  onChange={e => setSynthDfFlagKey(e.target.value)}
+                  style={{ width:"100%" }}
+                >
+                  <option value="auto">AUTO — match cadence (spec)</option>
+                  <option value="on">FORCE ON — assert flag regardless of cadence</option>
+                  <option value="off">FORCE OFF — clear flag regardless of cadence</option>
+                </select>
+              </div>
             </div>
             {(() => {
               const carrierFps = SYNTH_CARRIER_RATES[synthCarrierKey];
               const cad = SYNTH_CADENCES[synthCadenceKey];
               const carrierNomInt = Math.round(carrierFps);
               const fractional = Math.abs(carrierFps - carrierNomInt) > 0.01;
-              const mismatch = carrierNomInt !== cad.fps || (cad.dropFrame && !fractional && (carrierNomInt === 30 || carrierNomInt === 60));
+              const carrierMismatch = carrierNomInt !== cad.fps || (cad.dropFrame && !fractional && (carrierNomInt === 30 || carrierNomInt === 60));
+              const dfFlagVal = synthDfFlagKey === "auto" ? cad.dropFrame : synthDfFlagKey === "on";
+              const flagMismatch = dfFlagVal !== cad.dropFrame;
+              const mismatch = carrierMismatch || flagMismatch;
+              const msgs = [];
+              if (carrierMismatch) msgs.push("carrier/cadence");
+              if (flagMismatch) msgs.push("DF flag/cadence");
               return (
                 <div style={{ fontSize:10, color: mismatch ? "#ff6600" : "#444", fontFamily:"monospace", marginBottom:10, letterSpacing:1 }}>
-                  {mismatch ? "⚠ OUT-OF-SPEC — should trigger mismatch warning" : "✓ spec-conformant — carrier and cadence agree"}
+                  {mismatch
+                    ? `⚠ OUT-OF-SPEC — should trigger ${msgs.join(" + ")} warning${msgs.length > 1 ? "s" : ""}`
+                    : "✓ spec-conformant — carrier, cadence, and DF flag agree"}
                 </div>
               );
             })()}
