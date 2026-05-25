@@ -518,31 +518,71 @@ function SpecRefPanel() {
       </div>
       <div style={{ marginTop:12, color:"#ff9900", letterSpacing:2, fontSize:13 }}>SAMPLE RATE</div>
       <div style={{ color:"#555" }}>
-        <span style={{color:"#777"}}>measured</span> — the true sample-delivery
-        rate, counted from the capture worklet over wall-clock time. This is
-        the ground truth: it's what's actually arriving at the decoder.
-        <br/><span style={{color:"#777"}}>nominal</span> — the device's declared
-        rate from browser getSettings().sampleRate. Only shown when it
-        disagrees with measured (the OS is resampling the input), in which case
-        the readout is flagged <span style={{color:"#ffaa00"}}>RESAMPLED</span>.
-        When measured and nominal agree there's nothing to compare so only
-        measured is shown.
+        <span style={{color:"#777"}}>Live input —</span>{" "}
+        <span style={{color:"#777"}}>measured</span> is the true sample-
+        delivery rate counted from the capture worklet over wall-clock time
+        (ground truth, what's actually arriving at the decoder).{" "}
+        <span style={{color:"#777"}}>nominal</span> is the device's declared
+        rate from browser getSettings().sampleRate; only shown when it
+        disagrees with measured (the OS is resampling the input), in which
+        case the readout is flagged{" "}
+        <span style={{color:"#ffaa00"}}>RESAMPLED</span>.
+        <br/><span style={{color:"#777"}}>File input —</span>{" "}
+        shown as <span style={{color:"#777"}}>file · decoded</span>:{" "}
+        the file's native rate read from the WAV header (or "—" for
+        formats without one), then the rate at which the AudioContext
+        decoded it. For non-WAV files only the decoded rate is shown
+        because decodeAudioData resamples without exposing the source rate.
+      </div>
+      <div style={{ marginTop:12, color:"#ff9900", letterSpacing:2, fontSize:13 }}>CARRIER CLASSIFICATION</div>
+      <div style={{ color:"#555" }}>
+        Decides whether the source's true carrier rate is the integer SMPTE
+        rate (e.g. 30 fps) or its 1.001-divided NTSC sibling (29.97 fps).
+        Measurement-grade, wall-clock-referenced: the worklet stamps
+        performance.now() at each audio-chunk boundary, the decoder
+        interpolates per-frame arrival times across the chunk, and a
+        least-squares fit of frame-index vs wall-clock-time over a 20 s
+        stable window produces the rate estimate. Immune to the ±tens-of-
+        ppm ADC sample-clock bias that contaminates sample-count-based
+        timing.
+        <br/><span style={{color:"#777"}}>Commit rule:</span>{" "}
+        the estimate must sit ≥5σ off the integer/fractional midpoint
+        AND produce 3 consecutive same-side measurement updates ≥1 s
+        apart. Until committed, the rate label reads MEASURING; the AUDIT
+        panel shows the agreements counter.
+        <br/><span style={{color:"#777"}}>Divergence rule:</span>{" "}
+        once committed, a 3 s short window watches for source rate
+        changes. To drop the commit it must report the opposite side at
+        ≥5σ on 3 consecutive measurements ≥1 s apart (same hysteresis as
+        commit). Single-shot noise excursions on borderline sources do
+        not flip the commit; a genuine rate change is confirmed in
+        ~3–5 s.
+        <br/><span style={{color:"#777"}}>Hold:</span>{" "}
+        on signal loss (&gt;500 ms without a fresh frame) the committed
+        classification is held for 5 s, then dropped back to MEASURING.
       </div>
       <div style={{ marginTop:12, color:"#ff9900", letterSpacing:2, fontSize:13 }}>CLOCK DRIFT (ppm)</div>
       <div style={{ color:"#555" }}>
-        Deviation of the measured frame period from the exact expected period
-        for the detected SMPTE rate (integer or 1.001-divided NTSC), expressed
-        in parts per million. EMA-smoothed for steadiness. It is a steady
-        FREQUENCY OFFSET between the source and our capture clock — it does NOT
-        affect chasing/resolving, which slave to whatever rate arrives and
-        absorb a constant offset of even a few hundred ppm. Chase-ability is
-        governed by DROPOUT RATE and CONTINUITY, not drift.
+        Deviation of the source clock from the host machine's quartz,
+        expressed in parts per million. Derived from the same wall-clock
+        LSQ that drives carrier classification; EMA-smoothed for steadiness.
+        It is a steady FREQUENCY OFFSET — it does NOT affect chasing /
+        resolving, which slave to whatever rate arrives and absorb a
+        constant offset of even a few hundred ppm. Chase-ability is
+        governed by DROPOUT RATE and CONTINUITY, not drift. The host
+        quartz is itself undisciplined (typically ±50 ppm absolute on
+        consumer hardware), so this is drift relative to your laptop's
+        crystal, not absolute. For an absolute number you'd discipline
+        against an external reference.
         <br/><span style={{color:"#777"}}>Expected for LTC:</span>{" "}
         digital / genlocked source ≈ 0 ppm,
         free-running generator ±50–150 ppm (normal, chaseable).
         <br/><span style={{color:"#777"}}>Status thresholds:</span>{" "}
         &lt;5 ppm LOCKED green, 5–500 OK TO CHASE cyan,
         &gt;500 CHECK RATE amber (large enough to imply a mis-detected rate).
+        <br/>The AUDIT panel exposes a second drift readout — SOURCE → ADC,
+        from sample-count timing — and their difference as CAPTURE CLOCK
+        ERROR. See AUDIT below.
       </div>
       <div style={{ marginTop:12, color:"#ff9900", letterSpacing:2, fontSize:13 }}>DROPOUT RATE (%)</div>
       <div style={{ color:"#555" }}>
@@ -582,6 +622,44 @@ function SpecRefPanel() {
         clear the underlying break counter on the resuming frame (a long
         signal stop is treated as the start of a new run). Each break is
         also broadcast over the API publisher as a `continuity` message.
+      </div>
+      <div style={{ marginTop:12, color:"#ff9900", letterSpacing:2, fontSize:13 }}>AUDIT PANEL</div>
+      <div style={{ color:"#555" }}>
+        Collapsed by default under the LIVE INPUT STATUS readouts. Exposes
+        the raw measurement numbers behind the carrier classification, so
+        an engineer can audit the analyzer's conclusions instead of taking
+        them on faith.
+        <br/><span style={{color:"#777"}}>MEASURED FPS</span> — the
+        wall-clock LSQ slope, in frames per second, with its 1σ uncertainty
+        expressed in ppm of the nominal rate. The σ is floored by
+        performance.now() quantization to prevent over-confidence when
+        residuals happen to be tiny.
+        <br/><span style={{color:"#777"}}>WINDOW</span> — number of frames
+        and elapsed wall-clock span feeding the stable LSQ. Fills to the
+        20 s target as code rolls.
+        <br/><span style={{color:"#777"}}>CLASS</span> — the committed
+        classification (fractional / integer) and its confidence, or
+        MEASURING with the agreement counter (k/3) while accumulating
+        toward commit.
+        <br/><span style={{color:"#777"}}>SOURCE → HOST QUARTZ</span> —
+        the primary CLOCK DRIFT reading. Same value displayed above; shown
+        again here for context next to the other drifts. Positive = source
+        faster than this host's crystal.
+        <br/><span style={{color:"#777"}}>SOURCE → ADC</span> — drift
+        derived from the capture device's sample count instead of host
+        time. Compares the source against whatever clock drives the audio
+        interface's ADC.
+        <br/><span style={{color:"#777"}}>CAPTURE CLOCK ERROR</span> —
+        host − ADC drift with the LTC source as the common reference. If
+        this exceeds ±100 ppm the row turns amber: a healthy capture chain
+        should agree within a few tens of ppm, so a large value suggests
+        a faulty interface, an in-line sample rate converter, or a
+        mislabelled file rate.
+        <br/><span style={{color:"#777"}}>perf.now() RES</span> —
+        measured quantization of performance.now() on this browser /
+        cross-origin-isolation context. Bounds the floor on σ for the
+        carrier classifier; 100 µs is typical, 1 ms means the browser is
+        coarse-clamping clocks for Spectre mitigation.
       </div>
     </div>
   );
