@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Publisher } from "./publisher";
-import { MultiRateDecoder, rateKeyToNominalFps } from "./ltcDecoder";
+import { MultiRateDecoder, rateKeyToNominalFps, tcString } from "./ltcDecoder";
+import { framesToTc } from "./dropFrame";
 import { buildLtcAudioBuffer } from "./ltcSynth";
 
 // Carrier rates the synthesizer can emit. Independent of counting cadence.
@@ -49,51 +50,6 @@ const LEVEL_SPEC = {
   LOW_THRESHOLD: -30,     // dBFS — below this = may fail to lock
   SILENT_THRESHOLD: -60,  // dBFS — below this = dropout / no signal
 };
-
-// ─── Drop Frame helpers (SMPTE ST 12-1 §7) ───────────────────────────────────
-// DF rule: at the start of each minute that is not a multiple of 10, the
-// first `dropPerMin` frame numbers (00..dropPerMin-1) are skipped. The math
-// below is the single source of truth for that rule.
-//   29.97 DF → 30 fps nominal → skip 2 frames each minute (except every 10th)
-//   59.94 DF → 60 fps nominal → skip 4 frames each minute (except every 10th)
-function dropPerMin(nomFps) { return nomFps === 60 ? 4 : 2; }
-
-function isValidDropFrame(hh, mm, ss, ff, nominalFps) {
-  const maxFrame = nominalFps === 30 ? 29 : 59;
-  if (hh > 23 || mm > 59 || ss > 59 || ff > maxFrame) return false;
-  if (ss === 0 && mm % 10 !== 0 && ff < dropPerMin(nominalFps)) return false;
-  return true;
-}
-
-// frames → HH:MM:SS:FF, applying DF skipping when requested.
-function framesToTc(totalFrames, nomFps, dropFrame) {
-  if (!dropFrame) {
-    const ff = totalFrames % nomFps;
-    const totalSec = Math.floor(totalFrames / nomFps);
-    const ss = totalSec % 60;
-    const totalMin = Math.floor(totalSec / 60);
-    return {
-      hh: Math.floor(totalMin / 60) % 24,
-      mm: totalMin % 60,
-      ss, ff,
-    };
-  }
-  const drop = dropPerMin(nomFps);
-  const framesPerMin = nomFps * 60 - drop;
-  const framesPerTenMin = nomFps * 60 * 10 - drop * 9;
-  const tenMins = Math.floor(totalFrames / framesPerTenMin);
-  let rem = totalFrames % framesPerTenMin;
-  const minsInChunk = Math.min(9, Math.floor((rem + drop) / framesPerMin));
-  const mins = tenMins * 10 + minsInChunk;
-  rem = rem - minsInChunk * framesPerMin + drop;
-  if (mins % 10 !== 0) rem += drop;
-  return {
-    hh: Math.floor(mins / 60) % 24,
-    mm: mins % 60,
-    ss: Math.floor(rem / nomFps),
-    ff: rem % nomFps,
-  };
-}
 
 // ─── Audio Analysis Engine ───────────────────────────────────────────────────
 // The discrete input-channel index the LTC is tapped from. The analyzer only
@@ -275,9 +231,7 @@ function generateSimulatedAnalysis(rateKey, levelDbFS, noiseLevel, dropoutProb) 
 
 // ─── Formatting helpers ──────────────────────────────────────────────────────
 const padTc = (n) => String(n ?? 0).padStart(2, "0");
-function formatTc(hh, mm, ss, ff, dropFrame) {
-  return `${padTc(hh)}:${padTc(mm)}:${padTc(ss)}${dropFrame ? ";" : ":"}${padTc(ff)}`;
-}
+// HH:MM:SS:FF / HH:MM:SS;FF formatting comes from ltcDecoder's tcString().
 
 // ─── Shared style tokens ─────────────────────────────────────────────────────
 const PANEL = { border: "1px solid #1a1a1a", borderRadius: 3, background: "#080808" };
@@ -468,14 +422,6 @@ function RateDetector({ rateKey, candidateStatus, confidence }) {
   const allRates = Object.keys(SMPTE_RATES);
   // Map candidate fps → status for quick lookup.
   const byFps = new Map((candidateStatus || []).map(s => [s.fps, s]));
-  // For "rate key → candidate fps" we use the same mapping as the decoder.
-  const keyToFps = (k) => {
-    if (k === "59.94df" || k === "59.94" || k === "60") return 60;
-    if (k === "50") return 50;
-    if (k === "29.97df" || k === "29.97" || k === "30") return 30;
-    if (k === "25") return 25;
-    return 24;
-  };
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
       <div style={{ fontSize:11, color:"#555", fontFamily:"monospace", letterSpacing:2, marginBottom:2 }}>RATE DETECTION</div>
@@ -485,7 +431,7 @@ function RateDetector({ rateKey, candidateStatus, confidence }) {
         if (candidateStatus) {
           // Live: derive bar from the candidate decoder's real frame count.
           // 60 frames ≈ 2 s of clean LTC → bar full.
-          const s = byFps.get(keyToFps(r));
+          const s = byFps.get(rateKeyToNominalFps(r));
           const frames = s?.framesDecoded ?? 0;
           pct = Math.min(100, frames * (100 / 60));
         } else if (active) {
@@ -889,7 +835,6 @@ export default function SMPTEAnalyzer() {
       data.bitErrors = dec?.bitErrors ?? 0;
       data.lastFrameBits = dec?.lastFrameBits ?? null;
       data.candidateStatus = dec?.candidateStatus() ?? null;
-      data.continuityBreaks = dec?.continuityBreaks ?? 0;
       data.lastBreak = dec?.lastBreak ?? null;
       data.rateKey = effectiveRate;
 
@@ -927,7 +872,7 @@ export default function SMPTEAnalyzer() {
     }
 
     const sig = data.errors.join(",");
-    const tcStr = formatTc(data.hh, data.mm, data.ss, data.ff, data.dropFrame);
+    const tcStr = tcString(data);
     if (sig && sig !== lastErrSigRef.current) {
       // Finalize tick count for the previous sustained event before pushing a
       // new one, so the prior log entry reflects its full duration.

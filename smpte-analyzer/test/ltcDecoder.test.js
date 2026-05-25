@@ -3,10 +3,10 @@ import {
   LtcDecoder,
   MultiRateDecoder,
   parseFrame,
-  tcToFrameNumber,
   tcString,
   rateKeyToNominalFps,
 } from "../src/ltcDecoder.js";
+import { tcToFrameNumber, framesToTc, dropPerMin, isValidDropFrame } from "../src/dropFrame.js";
 
 // ---------------------------------------------------------------------------
 // LTC frame & biphase-mark synthesis helpers.
@@ -437,7 +437,7 @@ describe("MultiRateDecoder continuity tracking", () => {
     const mrd = new MultiRateDecoder();
     const samples = generateRunSamples({ sampleRate: sr, nominalFps: 30, dropFrame: false, count: 30 });
     mrd.feed(samples, sr);
-    expect(mrd.continuityBreaks).toBe(0);
+    expect(mrd.cadenceDetector.continuityBreaks).toBe(0);
     expect(mrd.lastBreak).toBeNull();
   });
 
@@ -451,7 +451,7 @@ describe("MultiRateDecoder continuity tracking", () => {
     mrd.feed(a, sr);
     nowVal += 200;
     mrd.feed(b, sr);
-    expect(mrd.continuityBreaks).toBeGreaterThanOrEqual(1);
+    expect(mrd.cadenceDetector.continuityBreaks).toBeGreaterThanOrEqual(1);
     expect(mrd.lastBreak?.type).toBe("JUMP");
   });
 
@@ -463,7 +463,7 @@ describe("MultiRateDecoder continuity tracking", () => {
     mrd.feed(a, sr);
     nowVal += 200;
     mrd.feed(b, sr);
-    expect(mrd.continuityBreaks).toBeGreaterThanOrEqual(1);
+    expect(mrd.cadenceDetector.continuityBreaks).toBeGreaterThanOrEqual(1);
     const breakBeforeGap = mrd.lastBreak;
     expect(breakBeforeGap?.t).toBeDefined();
     // Simulate a 4-second signal gap, then resume. The audio cut between b
@@ -488,7 +488,7 @@ describe("MultiRateDecoder continuity tracking", () => {
     mrd.feed(a, sr);
     nowVal += 200;
     mrd.feed(b, sr);
-    const breaksBefore = mrd.continuityBreaks;
+    const breaksBefore = mrd.cadenceDetector.continuityBreaks;
     // Keep feeding consecutive frames for several real seconds (under 3 s
     // gaps, so the auto-clear should NOT fire). Synthesis-chunk boundaries
     // may introduce additional spurious breaks; the property being tested
@@ -499,7 +499,7 @@ describe("MultiRateDecoder continuity tracking", () => {
       mrd.feed(cont, sr);
       nowVal += 1000;
     }
-    expect(mrd.continuityBreaks).toBeGreaterThanOrEqual(breaksBefore);
+    expect(mrd.cadenceDetector.continuityBreaks).toBeGreaterThanOrEqual(breaksBefore);
   });
 });
 
@@ -543,5 +543,67 @@ describe("LtcDecoder bit-error reset", () => {
     nowVal += 1000;
     dec.feed(new Float32Array(2048), sr, fps);
     expect(dec.bitErrors).toBe(12);
+  });
+});
+
+// ===========================================================================
+// framesToTc ↔ tcToFrameNumber round-trip
+//
+// These are mathematical inverses living in the same module now, but they're
+// independently consumed by the simulation generator, the synth and the
+// continuity tracker. A round-trip property test catches any future drift
+// between the two implementations, particularly around the DF skip rule's
+// minute / ten-minute boundaries and 24-hour wraparound.
+// ===========================================================================
+describe("framesToTc ↔ tcToFrameNumber round-trip", () => {
+  const cases = [
+    { fps: 24, dropFrame: false, label: "24 NDF" },
+    { fps: 25, dropFrame: false, label: "25 NDF" },
+    { fps: 30, dropFrame: false, label: "30 NDF" },
+    { fps: 50, dropFrame: false, label: "50 NDF" },
+    { fps: 60, dropFrame: false, label: "60 NDF" },
+    { fps: 30, dropFrame: true,  label: "29.97 DF" },
+    { fps: 60, dropFrame: true,  label: "59.94 DF" },
+  ];
+  for (const { fps, dropFrame, label } of cases) {
+    it(`round-trips across boundaries at ${label}`, () => {
+      // Probe densely around minute and ten-minute boundaries (where DF skip
+      // applies / doesn't), sparsely across the rest of a 24-hour day to keep
+      // the test fast. Include the very first and very last frame of the day.
+      const framesPerDay = 24 * 60 * 60 * fps - (dropFrame ? dropPerMin(fps) * (24 * 60 - 24 * 6) : 0);
+      const probes = new Set();
+      probes.add(0);
+      probes.add(framesPerDay - 1);
+      // Around every minute boundary in the first hour, plus every tenth
+      // minute boundary across the day.
+      for (let m = 0; m < 60; m++) {
+        const base = m * (60 * fps - (dropFrame && m % 10 !== 0 ? dropPerMin(fps) : 0));
+        for (let d = -2; d <= 5; d++) {
+          const n = base + d;
+          if (n >= 0 && n < framesPerDay) probes.add(n);
+        }
+      }
+      for (let mins = 0; mins < 24 * 60; mins += 10) {
+        const hh = Math.floor(mins / 60), mm = mins % 60;
+        const n = tcToFrameNumber(hh, mm, 0, 0, fps, dropFrame);
+        for (let d = -3; d <= 6; d++) {
+          if (n + d >= 0 && n + d < framesPerDay) probes.add(n + d);
+        }
+      }
+      for (const n of probes) {
+        const tc = framesToTc(n, fps, dropFrame);
+        const back = tcToFrameNumber(tc.hh, tc.mm, tc.ss, tc.ff, fps, dropFrame);
+        expect(back, `${label} n=${n} → ${JSON.stringify(tc)} → ${back}`).toBe(n);
+      }
+    });
+  }
+
+  it("isValidDropFrame rejects ff<dropPerMin at non-tenth minute boundaries", () => {
+    expect(isValidDropFrame(0, 1, 0, 0, 30)).toBe(false);
+    expect(isValidDropFrame(0, 1, 0, 1, 30)).toBe(false);
+    expect(isValidDropFrame(0, 1, 0, 2, 30)).toBe(true);
+    expect(isValidDropFrame(0, 10, 0, 0, 30)).toBe(true);  // 10th minute exempt
+    expect(isValidDropFrame(0, 1, 0, 3, 60)).toBe(false);
+    expect(isValidDropFrame(0, 1, 0, 4, 60)).toBe(true);
   });
 });

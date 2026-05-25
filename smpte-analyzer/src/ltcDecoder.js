@@ -223,26 +223,6 @@ export function parseFrame(b, nominalFps) {
   return { hh, mm, ss, ff, dropFrame, colorFrame };
 }
 
-// DF skip-per-minute: SMPTE ST 12-1 §7. Single source of truth shared by
-// the decoder, the synth, and the simulation path in App.jsx.
-//   29.97 DF → 30 fps nominal → skip 2 frames per non-tenth minute
-//   59.94 DF → 60 fps nominal → skip 4 frames per non-tenth minute
-export function dropPerMin(nomFps) { return nomFps === 60 ? 4 : 2; }
-
-// Absolute frame number for a HH:MM:SS:FF timecode. Used by continuity
-// detection — consecutive in-order LTC frames must differ by exactly 1.
-// `fps` here is the NOMINAL integer rate (24, 25, 30, 50, 60); both NTSC
-// fractional variants (29.97 / 23.976 / 59.94) use the same integer for
-// frame-count math because they just slow the clock, not the count.
-export function tcToFrameNumber(hh, mm, ss, ff, fps, dropFrame) {
-  if (!dropFrame) {
-    return ((hh * 60 + mm) * 60 + ss) * fps + ff;
-  }
-  const totalMins = hh * 60 + mm;
-  const dropped = dropPerMin(fps) * (totalMins - Math.floor(totalMins / 10));
-  return ((hh * 60 + mm) * 60 + ss) * fps + ff - dropped;
-}
-
 export function tcString(lf) {
   const p = n => String(n).padStart(2, "0");
   return `${p(lf.hh)}:${p(lf.mm)}:${p(lf.ss)}${lf.dropFrame ? ";" : ":"}${p(lf.ff)}`;
@@ -285,9 +265,11 @@ export class MultiRateDecoder {
     for (const { dec } of this.decoders) dec.pendingFrames = [];
   }
 
-  // Continuity tracking lives in the cadence detector now — these getters
-  // preserve the previous surface for callers.
-  get continuityBreaks() { return this.cadenceDetector.continuityBreaks; }
+  // Last continuity break observed by the cadence detector, surfaced for
+  // event-driven logging (App.jsx watches lb.t for change). The cadence
+  // detector also keeps a lifetime breaks counter for tests and diagnostics;
+  // it has no UI surface — the visible CONTINUITY readout uses a separate
+  // rolling-60s window kept in App.jsx.
   get lastBreak() { return this.cadenceDetector.lastBreak; }
 
   _pickWinner() {

@@ -22,7 +22,8 @@
 //     a stream whose carrier matches one rate but whose count uses a
 //     different cadence used to register continuous spurious JUMPs.
 
-import { tcToFrameNumber, tcString } from "./ltcDecoder";
+import { tcString } from "./ltcDecoder";
+import { tcToFrameNumber, minuteBoundaryDfRange } from "./dropFrame";
 
 const STANDARD_CADENCES = [24, 25, 30, 50, 60];
 
@@ -47,9 +48,13 @@ export class CadenceDetector {
     // DF inference from minute boundaries.
     this.minuteBoundaryDfHits = 0;
     this.minuteBoundaryNdfHits = 0;
-    // DF flag bit observation (independent of count behaviour).
-    this.dfFlagAsserted = 0;
-    this.dfFlagCleared = 0;
+    // DF flag bit observation (independent of count behaviour). Rolling
+    // window of recent frames' dropFrame bits — not a lifetime tally — so a
+    // mid-session source change from DF to NDF (re-jam, source switch) is
+    // reflected within ~10 s rather than after enough flips to outweigh the
+    // entire prior session.
+    this._dfFlagWindow = [];
+    this._DF_FLAG_WINDOW_SIZE = 300;
     // Continuity.
     this.continuityBreaks = 0;
     this.lastBreak = null;
@@ -61,24 +66,32 @@ export class CadenceDetector {
   feed(frame) {
     this.framesSeen++;
     if (frame.ff > this.maxFFObserved) this.maxFFObserved = frame.ff;
-    if (frame.dropFrame) this.dfFlagAsserted++; else this.dfFlagCleared++;
+    this._dfFlagWindow.push(frame.dropFrame ? 1 : 0);
+    if (this._dfFlagWindow.length > this._DF_FLAG_WINDOW_SIZE) this._dfFlagWindow.shift();
 
     if (this._prevFrame && frame.ff === 0 && this._prevFrame.ff > 0) {
       const v = this._prevFrame.ff;
       this.rolloverHist.set(v, (this.rolloverHist.get(v) ?? 0) + 1);
     }
 
-    // Minute boundary: ss=0 in a minute that's NOT a multiple of 10.
+    // Minute boundary: ss=0 in a minute that's NOT a multiple of 10. The NDF
+    // range is widened to ff<=1 so a single missed first-frame after the
+    // boundary doesn't bias the histogram against NDF; DF is tightened to
+    // [dropPerMin, dropPerMin+2] so the two windows don't overlap. The DF
+    // classification needs to know the cadence (drop=2 for 30, 4 for 60),
+    // so we defer until cadenceFps() returns a value.
     if (this._prevFrame
         && frame.ss === 0
         && this._prevFrame.ss === 59
         && frame.mm % 10 !== 0) {
-      if (frame.ff === 0) {
-        this.minuteBoundaryNdfHits++;
-      } else if (frame.ff >= 1 && frame.ff <= 5) {
-        // DF skip lands on FF=dropPerMin (2 for 30-cadence, 4 for 60-cadence).
-        // Allow a small range in case we missed the literal first frame.
-        this.minuteBoundaryDfHits++;
+      const cadence = this.cadenceFps();
+      if (cadence != null) {
+        const { ndfMax, dfMin, dfMax } = minuteBoundaryDfRange(cadence);
+        if (frame.ff <= ndfMax) {
+          this.minuteBoundaryNdfHits++;
+        } else if (frame.ff >= dfMin && frame.ff <= dfMax) {
+          this.minuteBoundaryDfHits++;
+        }
       }
     }
 
@@ -133,8 +146,8 @@ export class CadenceDetector {
   isDropFrame() {
     const boundaryObs = this.minuteBoundaryDfHits + this.minuteBoundaryNdfHits;
     if (boundaryObs === 0) {
-      if (this.dfFlagAsserted + this.dfFlagCleared === 0) return null;
-      return this.dfFlagAsserted > this.dfFlagCleared;
+      const flag = this._dfFlagMajority();
+      return flag;
     }
     return this.minuteBoundaryDfHits > this.minuteBoundaryNdfHits;
   }
@@ -145,9 +158,18 @@ export class CadenceDetector {
   // actually skipping frames at minute boundaries (or vice versa).
   dfFlagMatchesObservedCadence() {
     if (this.minuteBoundaryDfHits + this.minuteBoundaryNdfHits === 0) return null;
-    if (this.dfFlagAsserted + this.dfFlagCleared === 0) return null;
+    const flagDf = this._dfFlagMajority();
+    if (flagDf == null) return null;
     const observedDf = this.minuteBoundaryDfHits > this.minuteBoundaryNdfHits;
-    const flagDf = this.dfFlagAsserted > this.dfFlagCleared;
     return observedDf === flagDf;
+  }
+
+  // Majority DF flag across the rolling window, or null if empty.
+  _dfFlagMajority() {
+    const w = this._dfFlagWindow;
+    if (w.length === 0) return null;
+    let asserted = 0;
+    for (let i = 0; i < w.length; i++) asserted += w[i];
+    return asserted * 2 > w.length;
   }
 }

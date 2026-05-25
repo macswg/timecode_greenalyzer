@@ -7,6 +7,8 @@
 // (the "30 DF" case in issue #1), or a 24-cadence count played back at 29.97
 // fps timing. Those streams are how we exercise carrierCadenceMismatch().
 
+import { dropPerMin } from "./dropFrame";
+
 const SYNC = [0,0,1,1,1,1,1,1,1,1,1,1,1,1,0,1];
 
 function writeLsbFirst(bits, start, value, nBits) {
@@ -54,7 +56,7 @@ export function nextTc(hh, mm, ss, ff, cadenceFps, dropFrame) {
         hh = (hh + 1) % 24;
       }
       if (dropFrame && mm % 10 !== 0) {
-        ff = cadenceFps === 60 ? 4 : 2;
+        ff = dropPerMin(cadenceFps);
       }
     }
   }
