@@ -868,15 +868,16 @@ export default function SMPTEAnalyzer() {
       const live = [];
       if (lvl > LEVEL_SPEC.CLIP_THRESHOLD) live.push("CLIP");
       else if (lvl > LEVEL_SPEC.HOT_THRESHOLD) live.push("HOT");
-      // LOW / DROPOUT both imply "there is (or was) a signal that's now
-      // weak or gone". Suppress them when the input is just idle (silent
-      // device, nothing routed) so switching to e.g. BlackHole doesn't
-      // light up the tags. A signal counts as present if level is above
-      // the silent threshold OR a frame decoded within the last 2 s.
+      // LOW / DROPOUT only mean something for an LTC signal that's degrading.
+      // Without a recent decoded frame the input is either silence (idle
+      // device) or non-LTC audio (music, speech, room tone) — neither case
+      // benefits from level tagging, and music below LOW_THRESHOLD would
+      // otherwise flood the log with spurious LOW entries. Gate both tags on
+      // a frame decoded within the last 2 s.
       const lastDecodeAge = dec?.lastFrame ? performance.now() - dec.lastFrame.t : Infinity;
-      const hasSignal = lvl >= LEVEL_SPEC.SILENT_THRESHOLD || lastDecodeAge < 2000;
-      if (lvl < LEVEL_SPEC.LOW_THRESHOLD && hasSignal) live.push("LOW");
-      if (lvl < LEVEL_SPEC.SILENT_THRESHOLD && lastDecodeAge < 2000) live.push("DROPOUT");
+      const hasRecentFrame = lastDecodeAge < 2000;
+      if (lvl < LEVEL_SPEC.LOW_THRESHOLD && hasRecentFrame) live.push("LOW");
+      if (lvl < LEVEL_SPEC.SILENT_THRESHOLD && hasRecentFrame) live.push("DROPOUT");
       // DF conformance: a frame asserting DF that lands on FF<dropPerMin at
       // a non-tenth-minute boundary is the spec violation captured by
       // isValidDropFrame. Only meaningful once cadence is known (so we can
