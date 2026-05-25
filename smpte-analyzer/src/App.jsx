@@ -799,11 +799,15 @@ export default function SMPTEAnalyzer() {
       // Real peak from the time-domain buffer (overrides the sim's jittered fake).
       data.peakDbFS = realPeakDb;
       data.levelDbFS = lvl;
-      if (fresh) {
+      if (lf) {
+        // Hold the last decoded timecode even after the signal stops, so the
+        // operator can see what frame the code died on. frameValid only goes
+        // true when the frame is fresh — TimecodeDisplay renders the held
+        // value in red once valid flips off.
         data.hh = lf.hh; data.mm = lf.mm; data.ss = lf.ss; data.ff = lf.ff;
         data.dropFrame = lf.dropFrame;
         data.colorFrame = lf.colorFrame;
-        data.frameValid = true;
+        data.frameValid = fresh;
       } else {
         data.hh = 0; data.mm = 0; data.ss = 0; data.ff = 0;
         data.dropFrame = false;
@@ -1886,14 +1890,14 @@ export default function SMPTEAnalyzer() {
           ) : (
             <table style={{ width:"100%", borderCollapse:"collapse" }}>
               <thead>
-                <tr style={{ color:"#444", fontSize:10, letterSpacing:2, textAlign:"left" }}>
-                  <th style={{ padding:"4px 12px", fontWeight:"normal" }}>TIME</th>
-                  <th style={{ padding:"4px 12px", fontWeight:"normal" }}>TIMECODE</th>
-                  <th style={{ padding:"4px 12px", fontWeight:"normal" }}>RATE</th>
-                  <th style={{ padding:"4px 12px", fontWeight:"normal" }}>SRC</th>
+                <tr style={{ color:"#444", fontSize:10, letterSpacing:2 }}>
+                  <th style={{ padding:"4px 12px", fontWeight:"normal", textAlign:"left" }}>TIME</th>
+                  <th style={{ padding:"4px 12px", fontWeight:"normal", textAlign:"left" }}>TIMECODE</th>
+                  <th style={{ padding:"4px 12px", fontWeight:"normal", textAlign:"left" }}>RATE</th>
+                  <th style={{ padding:"4px 12px", fontWeight:"normal", textAlign:"left" }}>SRC</th>
                   <th style={{ padding:"4px 12px", fontWeight:"normal", textAlign:"right" }}>LEVEL</th>
                   <th style={{ padding:"4px 12px", fontWeight:"normal", textAlign:"right" }}>SNR</th>
-                  <th style={{ padding:"4px 12px", fontWeight:"normal" }}>ERRORS</th>
+                  <th style={{ padding:"4px 12px", fontWeight:"normal", textAlign:"left" }}>ERRORS</th>
                 </tr>
               </thead>
               <tbody>
