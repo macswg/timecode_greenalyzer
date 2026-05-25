@@ -111,6 +111,11 @@ function readWavSampleRate(arrayBuffer) {
 //      THD ≈ 38%. Heavier values indicate added distortion (saturation,
 //      clipping, anti-aliasing problems).
 let _snrBins = null;
+// Reused valley-bin buffer for the noise-floor median; the loop appends at
+// most ~60 entries (one per (h+0.5)*f1 null up to nyquist*0.95) and we sort
+// the populated prefix in place. Float32Array.sort() is numerical by default
+// and avoids the per-tick Array+sort allocation that the original used.
+const _valleyBins = new Float32Array(80);
 function computeLtcSpectralMetrics(analyser, sampleRate, nominalFps) {
   if (!_snrBins || _snrBins.length !== analyser.frequencyBinCount) {
     _snrBins = new Float32Array(analyser.frequencyBinCount);
@@ -145,19 +150,20 @@ function computeLtcSpectralMetrics(analyser, sampleRate, nominalFps) {
   }
   if (sigBins === 0 || sigPow <= 0) return null;
 
-  const valleyBinsLin = [];
+  let vCount = 0;
   for (let h = 0; h < 60; h++) {
     const fValley = (h + 0.5) * f1;
     if (fValley < 80) continue;
     if (fValley > nyquist * 0.95) break;
     const binIdx = Math.round(fValley / binWidth);
-    if (binIdx >= 1 && binIdx < bins.length) {
-      valleyBinsLin.push(Math.pow(10, bins[binIdx] / 10));
+    if (binIdx >= 1 && binIdx < bins.length && vCount < _valleyBins.length) {
+      _valleyBins[vCount++] = Math.pow(10, bins[binIdx] / 10);
     }
   }
-  if (valleyBinsLin.length === 0) return null;
-  valleyBinsLin.sort((a, b) => a - b);
-  const noiseFloorLin = valleyBinsLin[Math.floor(valleyBinsLin.length / 2)];
+  if (vCount === 0) return null;
+  const vSlice = _valleyBins.subarray(0, vCount);
+  vSlice.sort();
+  const noiseFloorLin = vSlice[Math.floor(vCount / 2)];
   if (!(noiseFloorLin > 0)) return null;
 
   const noiseInSigBandLin = noiseFloorLin * sigBins;
@@ -598,7 +604,7 @@ export default function SMPTEAnalyzer() {
   const [peakHold, setPeakHold] = useState(-60);
   const [frameCount, setFrameCount] = useState(0);
   const [errorCount, setErrorCount] = useState(0);
-  const [errorCounts, setErrorCounts] = useState({ CLIP:0, HOT:0, LOW:0, DROPOUT:0, NOISE:0, DF_INVALID:0 });
+  const [errorCounts, setErrorCounts] = useState({ CLIP:0, HOT:0, LOW:0, DROPOUT:0, NOISE:0, DF_INVALID:0, AUDIO_GAP:0 });
   const [sessionLog, setSessionLog] = useState([]);
   const audioCtxRef = useRef(null);
   const analyserRef = useRef(null);
@@ -618,6 +624,10 @@ export default function SMPTEAnalyzer() {
   const currentSigTicksRef = useRef(0);
   const currentSigFlushTickRef = useRef(0);
   const lastBreakTRef = useRef(0);
+  // Most recent worklet underrun: { t, gapMs, count } updated whenever the
+  // audio thread reports a process()-call gap beyond ~2.5× the quantum.
+  // Distinct from "no LTC signal" — the audio path itself was starved.
+  const workletGlitchRef = useRef(null);
   // Rolling 60 s window of recent continuity breaks (performance.now() timestamps).
   // The decoder's `continuityBreaks` is a lifetime counter; for a long session
   // (e.g. continuous playback across many songs, each cut producing a JUMP)
@@ -866,6 +876,11 @@ export default function SMPTEAnalyzer() {
           && !isValidDropFrame(lf.hh, lf.mm, lf.ss, lf.ff, cadenceFps)) {
         live.push("DF_INVALID");
       }
+      // Surface a recent worklet underrun for 2 s so an intermittent audio
+      // starvation event is visible without permanently latching.
+      const g = workletGlitchRef.current;
+      if (g && performance.now() - g.t < 2000) live.push("AUDIO_GAP");
+      data.workletGlitches = g?.count ?? 0;
       data.errors = live;
       data.frameValid = fresh && live.length === 0;
     }
@@ -883,12 +898,11 @@ export default function SMPTEAnalyzer() {
     const sig = data.errors.join(",");
     const tcStr = tcString(data);
     if (sig && sig !== lastErrSigRef.current) {
-      // Finalize tick count for the previous sustained event before pushing a
-      // new one, so the prior log entry reflects its full duration.
-      if (currentSigTicksRef.current > 0) {
-        updateLastLogCount(currentSigTicksRef.current);
-      }
-      pushLog({
+      // Finalize tick count for the previous sustained event AND push the new
+      // one in a single state update — splitting into two setSessionLog calls
+      // caused a second render per error rollover.
+      const finalCount = currentSigTicksRef.current;
+      const entry = {
         t: Date.now(),
         tc: tcStr,
         rate: rateKey,
@@ -897,6 +911,17 @@ export default function SMPTEAnalyzer() {
         snr: Number.isFinite(data.snr) ? +data.snr.toFixed(1) : null,
         source: useRealAudio ? "live" : "sim",
         count: 1,
+      };
+      setSessionLog(prev => {
+        let next = prev;
+        if (finalCount > 0 && next.length > 0) {
+          const last = next[next.length - 1];
+          if (last.count !== finalCount) {
+            next = [...next.slice(0, -1), { ...last, count: finalCount }];
+          }
+        }
+        if (next.length >= LOG_CAP) next = next.slice(next.length - LOG_CAP + 1);
+        return [...next, entry];
       });
       currentSigTicksRef.current = 1;
       currentSigFlushTickRef.current = 1;
@@ -1107,9 +1132,17 @@ export default function SMPTEAnalyzer() {
     sampleClockRef.current = { n: 0, marks: [] };
     measuredRateEmaRef.current = null;
     worklet.port.onmessage = (e) => {
-      decoder.feed(e.data, sampleRateRef.current);
+      const msg = e.data;
+      if (msg.type === "glitch") {
+        workletGlitchRef.current = { t: performance.now(), gapMs: msg.gapMs,
+          count: (workletGlitchRef.current?.count ?? 0) + 1 };
+        return;
+      }
+      // type === "samples"
+      const samples = msg.samples;
+      decoder.feed(samples, sampleRateRef.current);
       const sc = sampleClockRef.current;
-      sc.n += e.data.length;
+      sc.n += samples.length;
       const now = performance.now();
       sc.marks.push({ t: now, n: sc.n });
       while (sc.marks.length > 2 && now - sc.marks[0].t > 4000) sc.marks.shift();
@@ -1300,7 +1333,7 @@ export default function SMPTEAnalyzer() {
   function clearLog() {
     setSessionLog([]);
     setErrorCount(0);
-    setErrorCounts({ CLIP:0, HOT:0, LOW:0, DROPOUT:0, NOISE:0, DF_INVALID:0 });
+    setErrorCounts({ CLIP:0, HOT:0, LOW:0, DROPOUT:0, NOISE:0, DF_INVALID:0, AUDIO_GAP:0 });
     lastErrSigRef.current = "";
     currentSigTicksRef.current = 0;
     currentSigFlushTickRef.current = 0;
@@ -1631,11 +1664,11 @@ export default function SMPTEAnalyzer() {
 
       {/* Error Badges */}
       <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:16 }}>
-        {["CLIP","HOT","LOW","DROPOUT","NOISE","DF_INVALID"].map(e => (
+        {["CLIP","HOT","LOW","DROPOUT","NOISE","DF_INVALID","AUDIO_GAP"].map(e => (
           <StatusBadge
             key={e} label={e}
             active={analysis?.errors?.includes(e)}
-            color={e==="CLIP"?"#ff0000":e==="HOT"?"#ff6600":e==="LOW"?"#ff9900":e==="DROPOUT"?"#ff3399":e==="NOISE"?"#cc88ff":"#ffaa00"}
+            color={e==="CLIP"?"#ff0000":e==="HOT"?"#ff6600":e==="LOW"?"#ff9900":e==="DROPOUT"?"#ff3399":e==="NOISE"?"#cc88ff":e==="DF_INVALID"?"#ffaa00":"#22d3ee"}
             warn={true}
             count={errorCounts[e]}
           />

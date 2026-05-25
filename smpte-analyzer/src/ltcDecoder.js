@@ -152,8 +152,11 @@ export class LtcDecoder {
     const expectedFrameSamples = 79 * this.samplesPerBit;
     const spanError = Math.abs(frameSamples - expectedFrameSamples) / expectedFrameSamples;
     if (spanError > 0.03) return;
-    const f = buf.slice(n - 80);
-    const parsed = parseFrame(f, this.nominalFps);
+    // Read the 80 frame bits in place via a start index; avoids the per-frame
+    // 80-element allocation that buf.slice(n-80) would otherwise produce on
+    // every successful sync match.
+    const frameStart = n - 80;
+    const parsed = parseFrame(buf, this.nominalFps, frameStart);
     // FF must fit the candidate's cadence: an LTC frame at 24-cadence wraps
     // at FF=24, at 30-cadence FF=30, etc. parseFrame's own bound is just the
     // 6-bit field width (FF≤79); without this cadence check a single-bit
@@ -170,7 +173,9 @@ export class LtcDecoder {
       const frame = { ...parsed, t: now };
       this.lastFrame = frame;
       this.pendingFrames.push(frame);
-      this.lastFrameBits = Uint8Array.from(f);
+      const fbits = new Uint8Array(80);
+      for (let k = 0; k < 80; k++) fbits[k] = buf[frameStart + k];
+      this.lastFrameBits = fbits;
       this.framesDecoded++;
       this.locked = true;
       this.recentFrameSpans.push(frameSamples);
@@ -197,8 +202,9 @@ export class LtcDecoder {
   }
 }
 
-export function parseFrame(b, nominalFps) {
-  const frUnits  = b[0]  | (b[1]<<1) | (b[2]<<2) | (b[3]<<3);
+export function parseFrame(b, nominalFps, start = 0) {
+  const o = start;
+  const frUnits  = b[o+0]  | (b[o+1]<<1) | (b[o+2]<<2) | (b[o+3]<<3);
   // Frame-tens field: standard LTC uses 2 bits (max FF=39, enough for ≤30
   // fps). SMPTE ST 12-1:2014 §6.6 (HFR) repurposes bit 58 (BGF0 in legacy
   // LTC) as a third frame-tens bit, expanding the field to 3 bits
@@ -206,15 +212,15 @@ export function parseFrame(b, nominalFps) {
   // otherwise a spec-conformant ≤30 fps generator that sets BGF0=1
   // (binary group data present) would be miscoded as FF+40.
   const useHfrTens = nominalFps != null && nominalFps >= 50;
-  const frTens   = b[8] | (b[9]<<1) | (useHfrTens ? (b[58]<<2) : 0);
-  const dropFrame = b[10] === 1;
-  const colorFrame = b[11] === 1;
-  const secUnits = b[16] | (b[17]<<1) | (b[18]<<2) | (b[19]<<3);
-  const secTens  = b[24] | (b[25]<<1) | (b[26]<<2);
-  const minUnits = b[32] | (b[33]<<1) | (b[34]<<2) | (b[35]<<3);
-  const minTens  = b[40] | (b[41]<<1) | (b[42]<<2);
-  const hrUnits  = b[48] | (b[49]<<1) | (b[50]<<2) | (b[51]<<3);
-  const hrTens   = b[56] | (b[57]<<1);
+  const frTens   = b[o+8] | (b[o+9]<<1) | (useHfrTens ? (b[o+58]<<2) : 0);
+  const dropFrame = b[o+10] === 1;
+  const colorFrame = b[o+11] === 1;
+  const secUnits = b[o+16] | (b[o+17]<<1) | (b[o+18]<<2) | (b[o+19]<<3);
+  const secTens  = b[o+24] | (b[o+25]<<1) | (b[o+26]<<2);
+  const minUnits = b[o+32] | (b[o+33]<<1) | (b[o+34]<<2) | (b[o+35]<<3);
+  const minTens  = b[o+40] | (b[o+41]<<1) | (b[o+42]<<2);
+  const hrUnits  = b[o+48] | (b[o+49]<<1) | (b[o+50]<<2) | (b[o+51]<<3);
+  const hrTens   = b[o+56] | (b[o+57]<<1);
   const ff = frTens * 10 + frUnits;
   const ss = secTens * 10 + secUnits;
   const mm = minTens * 10 + minUnits;
