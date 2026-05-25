@@ -34,8 +34,8 @@ export class LtcDecoder {
     this.lastFrameBits = null;      // Uint8Array(80) — the actual bits of the most recent decoded frame
     this.framesDecoded = 0;
     this.bitErrors = 0;
-    this.lastBitTime = 0;
     this.samplesPerBit = 0;         // set on first feed()
+    this._cachedSampleRate = 0;     // memoisation key for samplesPerBit
     this.recentFrameSpans = [];     // rolling window of actual sample spans for the last decoded frames
     this.recentDecodeTimes = [];    // wall-clock timestamps of recent successful decodes (for dropout rate)
     this.pendingFrames = [];        // frames decoded since the consumer last drained — needed for continuity tracking when a single audio chunk produces more than one frame
@@ -44,15 +44,23 @@ export class LtcDecoder {
   }
 
   feed(samples, sampleRate, nominalFps) {
-    this.samplesPerBit = sampleRate / (nominalFps * 80);
+    // samplesPerBit only depends on (sampleRate, nominalFps); nominalFps is
+    // fixed per decoder instance and sampleRate only changes on device switch.
+    if (sampleRate !== this._cachedSampleRate) {
+      this.samplesPerBit = sampleRate / (nominalFps * 80);
+      this._cachedSampleRate = sampleRate;
+    }
+    this.nominalFps = nominalFps;
     if (this.sbEst === 0) this.sbEst = this.samplesPerBit;
-    // If we haven't decoded a frame in over a minute, the accumulated
-    // bit-error count is stale — it was racked up against noise transitions
-    // while no LTC was present. Clear it so a returning signal isn't
-    // unfairly penalised in the FRAME INTEGRITY readout. Also drop the
-    // lock flag so the absurdity bounds widen back out for re-acquisition.
-    if (this.bitErrors > 0 && this.lastFrame && performance.now() - this.lastFrame.t > 60000) {
+    // If we haven't decoded a frame in over a minute the accumulated state is
+    // stale: bit-error counts were racked up against noise while no LTC was
+    // present, and the running frame count outlives the session it described.
+    // Reset both symmetrically so any cumulative ratio derived from them stays
+    // honest, and drop the lock flag so the absurdity bounds widen for
+    // re-acquisition.
+    if (this.lastFrame && performance.now() - this.lastFrame.t > 60000) {
       this.bitErrors = 0;
+      this.framesDecoded = 0;
       this.locked = false;
       this.sbEst = this.samplesPerBit;
     }
@@ -111,9 +119,12 @@ export class LtcDecoder {
   _pushBit(b) {
     this.bitBuf.push(b);
     this.bitSampleIdx.push(this.sampleIndex);
-    this.lastBitTime = performance.now();
-    if (this.bitBuf.length > 200) {
-      const drop = this.bitBuf.length - 200;
+    // Cap at ~1.2 frames (96 bits). Sync detection only ever looks at the
+    // last 80 bits and the span check spans 80 bits, so older bits serve no
+    // purpose — keeping a larger window just delays resync after a noise burst
+    // by holding garbage in the buffer for ~2 extra frame durations.
+    if (this.bitBuf.length > 96) {
+      const drop = this.bitBuf.length - 96;
       this.bitBuf.splice(0, drop);
       this.bitSampleIdx.splice(0, drop);
     }
@@ -142,7 +153,18 @@ export class LtcDecoder {
     const spanError = Math.abs(frameSamples - expectedFrameSamples) / expectedFrameSamples;
     if (spanError > 0.03) return;
     const f = buf.slice(n - 80);
-    const parsed = parseFrame(f);
+    const parsed = parseFrame(f, this.nominalFps);
+    // FF must fit the candidate's cadence: an LTC frame at 24-cadence wraps
+    // at FF=24, at 30-cadence FF=30, etc. parseFrame's own bound is just the
+    // 6-bit field width (FF≤79); without this cadence check a single-bit
+    // noise flip in the frame-tens nibble can yield e.g. FF=43 in a 30-cadence
+    // stream and be accepted as a valid frame.
+    if (parsed && parsed.ff >= this.nominalFps) {
+      this.bitErrors++;
+      this.bitBuf = buf.slice(n - 16);
+      this.bitSampleIdx = idx.slice(n - 16);
+      return;
+    }
     if (parsed) {
       const now = performance.now();
       const frame = { ...parsed, t: now };
@@ -175,16 +197,16 @@ export class LtcDecoder {
   }
 }
 
-export function parseFrame(b) {
+export function parseFrame(b, nominalFps) {
   const frUnits  = b[0]  | (b[1]<<1) | (b[2]<<2) | (b[3]<<3);
   // Frame-tens field: standard LTC uses 2 bits (max FF=39, enough for ≤30
-  // fps). The high-frame-rate variant in SMPTE ST 12-1:2014 §6.6 repurposes
-  // bit 58 (formerly BGF) as a third frame-tens bit, expanding the field to
-  // 3 bits (max FF=79). We always read bit 58 as part of frame tens — at
-  // ≤30 cadences bit 58 stays 0 in any HFR-aware generator, and the
-  // analyzer doesn't surface binary group flags anyway, so there's no
-  // downside to always honouring it.
-  const frTens   = b[8]  | (b[9]<<1) | (b[58]<<2);
+  // fps). SMPTE ST 12-1:2014 §6.6 (HFR) repurposes bit 58 (BGF0 in legacy
+  // LTC) as a third frame-tens bit, expanding the field to 3 bits
+  // (max FF=79). We only consult bit 58 when the candidate rate is 50/60 —
+  // otherwise a spec-conformant ≤30 fps generator that sets BGF0=1
+  // (binary group data present) would be miscoded as FF+40.
+  const useHfrTens = nominalFps != null && nominalFps >= 50;
+  const frTens   = b[8] | (b[9]<<1) | (useHfrTens ? (b[58]<<2) : 0);
   const dropFrame = b[10] === 1;
   const colorFrame = b[11] === 1;
   const secUnits = b[16] | (b[17]<<1) | (b[18]<<2) | (b[19]<<3);
@@ -201,6 +223,12 @@ export function parseFrame(b) {
   return { hh, mm, ss, ff, dropFrame, colorFrame };
 }
 
+// DF skip-per-minute: SMPTE ST 12-1 §7. Single source of truth shared by
+// the decoder, the synth, and the simulation path in App.jsx.
+//   29.97 DF → 30 fps nominal → skip 2 frames per non-tenth minute
+//   59.94 DF → 60 fps nominal → skip 4 frames per non-tenth minute
+export function dropPerMin(nomFps) { return nomFps === 60 ? 4 : 2; }
+
 // Absolute frame number for a HH:MM:SS:FF timecode. Used by continuity
 // detection — consecutive in-order LTC frames must differ by exactly 1.
 // `fps` here is the NOMINAL integer rate (24, 25, 30, 50, 60); both NTSC
@@ -210,9 +238,8 @@ export function tcToFrameNumber(hh, mm, ss, ff, fps, dropFrame) {
   if (!dropFrame) {
     return ((hh * 60 + mm) * 60 + ss) * fps + ff;
   }
-  const dropPerMin = fps === 60 ? 4 : 2;
   const totalMins = hh * 60 + mm;
-  const dropped = dropPerMin * (totalMins - Math.floor(totalMins / 10));
+  const dropped = dropPerMin(fps) * (totalMins - Math.floor(totalMins / 10));
   return ((hh * 60 + mm) * 60 + ss) * fps + ff - dropped;
 }
 
@@ -236,9 +263,13 @@ export class MultiRateDecoder {
     // Counting-cadence and continuity tracking. Driven by the decoded
     // HH:MM:SS:FF sequence, NOT by the carrier-rate winner. See cadenceDetector.js.
     this.cadenceDetector = new CadenceDetector();
+    // Carrier observation cached across getter calls; invalidated whenever
+    // new samples arrive (a new feed() can shift winner / medianSpan).
+    this._carrierObs = null;
   }
 
   feed(samples, sampleRate) {
+    this._carrierObs = null;
     for (const { fps, dec } of this.decoders) dec.feed(samples, sampleRate, fps);
     this._pickWinner();
     // Drain the winning decoder's pending frames into the cadence detector.
@@ -269,22 +300,50 @@ export class MultiRateDecoder {
     // the cumulative score keeps the old decoder ahead for ~60 s until the
     // new one's framesDecoded catches up. A page refresh hid the bug because
     // all counters started at 0. Windowed counts decay naturally.
+    //
+    // Selection is two-stage:
+    //   1. If any decoder has a frame fresher than 500 ms, restrict the field
+    //      to those decoders. A stalled candidate with a huge windowed count
+    //      should never beat a candidate that's actually still decoding.
+    //   2. Among the eligible set, pick the highest windowed frame count.
+    //      Ties (and they happen briefly on wrong-rate signals where a higher-
+    //      fps decoder catches spurious sync words) are broken by frame-span
+    //      proximity to that candidate's nominal period — the decoder whose
+    //      measured span matches its expected period is the better fit.
     const now = performance.now();
     const cutoff = now - 20000;
-    let bestScore = -Infinity, bestIdx = -1;
-    for (let i = 0; i < this.decoders.length; i++) {
-      const d = this.decoders[i].dec;
-      // recentDecodeTimes is appended chronologically; count entries inside
-      // the window by walking from the tail.
+    const scores = this.decoders.map(({ dec }) => {
       let recentFrames = 0;
-      const times = d.recentDecodeTimes;
+      const times = dec.recentDecodeTimes;
       for (let j = times.length - 1; j >= 0; j--) {
         if (times[j] >= cutoff) recentFrames++;
         else break;
       }
-      const recencyBonus = (d.lastFrame && now - d.lastFrame.t < 500) ? 1000 : 0;
-      const score = recentFrames + recencyBonus;
-      if (score > bestScore && d.lastFrame) { bestScore = score; bestIdx = i; }
+      const fresh = dec.lastFrame && now - dec.lastFrame.t < 500;
+      let spanError = Infinity;
+      const spans = dec.recentFrameSpans;
+      if (spans && spans.length > 0 && dec.samplesPerBit > 0) {
+        let sum = 0;
+        for (let k = 0; k < spans.length; k++) sum += spans[k];
+        const meanSpan = sum / spans.length;
+        const expected = 79 * dec.samplesPerBit;
+        spanError = Math.abs(meanSpan - expected) / expected;
+      }
+      return { recentFrames, fresh, spanError, hasFrame: !!dec.lastFrame };
+    });
+    const anyFresh = scores.some(s => s.fresh);
+    let bestIdx = -1;
+    let bestRecent = -1, bestSpanError = Infinity;
+    for (let i = 0; i < scores.length; i++) {
+      const s = scores[i];
+      if (!s.hasFrame) continue;
+      if (anyFresh && !s.fresh) continue;
+      if (s.recentFrames > bestRecent
+          || (s.recentFrames === bestRecent && s.spanError < bestSpanError)) {
+        bestIdx = i;
+        bestRecent = s.recentFrames;
+        bestSpanError = s.spanError;
+      }
     }
     this.winnerIdx = bestIdx;
   }
@@ -315,26 +374,23 @@ export class MultiRateDecoder {
   // from their integer counterparts (30, 24, 60). At least 10 decoded frames
   // are needed before this returns a value to filter out per-frame jitter.
   medianFrameSpan() {
-    const spans = this.winner?.dec.recentFrameSpans;
-    if (!spans || spans.length < 10) return null;
-    const sorted = [...spans].sort((a, b) => a - b);
-    return sorted[Math.floor(sorted.length / 2)];
+    return this.carrierObservation().medianSpan;
   }
 
   // Whether the carrier is at a 1.001-divided NTSC rate vs the integer rate.
   // Decided ONLY by measured frame span — never by the LTC DF flag bit or by
   // the counting cadence. This is the load-bearing primitive that separates
   // carrier-rate detection from counting-cadence detection.
+  //
+  // Sample-rate dependence: the 1.0005 threshold (half the 0.1% gap between
+  // integer and NTSC rates) is compared against a median whose resolution is
+  // one sample per 79-bit span. At 48 kHz the 30/29.97 margin is ~1.58
+  // samples — comfortable. At 44.1 kHz the 60/59.94 margin shrinks to ~1.45
+  // samples — still works. At a lower SR (e.g. 22.05 kHz) headroom collapses
+  // and classification becomes unreliable. If that surfaces in practice,
+  // switch to a ppm threshold against the mean span instead of the median.
   _carrierIsFractional() {
-    const fps = this.nominalFps;
-    if (fps === 25 || fps === 50) return false;
-    if (fps !== 24 && fps !== 30 && fps !== 60) return null;
-    const winner = this.winner;
-    if (!winner) return null;
-    const expected = 79 * winner.dec.samplesPerBit;
-    const measured = this.medianFrameSpan();
-    if (measured == null) return null;
-    return (measured / expected) >= 1.0005;
+    return this.carrierObservation().fractional;
   }
 
   // Carrier-rate key, purely from frame-span timing. No DF, no flag bits, no
@@ -342,16 +398,42 @@ export class MultiRateDecoder {
   //   "23.976" | "24" | "25" | "29.97" | "30" | "50" | "59.94" | "60"
   // or null if not yet locked / not enough span samples.
   carrierRate() {
+    return this.carrierObservation().carrierRate;
+  }
+
+  // One-shot observation of the carrier, computed lazily and cached until the
+  // next feed() invalidates it. Bundles the fields that the four public
+  // getters (carrierRate / cadence / carrierCadenceMismatch / detectedRateKey)
+  // would otherwise each compute independently per tick.
+  carrierObservation() {
+    if (this._carrierObs) return this._carrierObs;
     const fps = this.nominalFps;
-    if (fps == null) return null;
-    if (fps === 25) return "25";
-    if (fps === 50) return "50";
-    const frac = this._carrierIsFractional();
-    if (frac == null) return null;
-    if (fps === 24) return frac ? "23.976" : "24";
-    if (fps === 30) return frac ? "29.97" : "30";
-    if (fps === 60) return frac ? "59.94" : "60";
-    return null;
+    const winner = this.winner;
+    let medianSpan = null;
+    if (winner) {
+      const spans = winner.dec.recentFrameSpans;
+      if (spans && spans.length >= 10) {
+        const sorted = [...spans].sort((a, b) => a - b);
+        medianSpan = sorted[Math.floor(sorted.length / 2)];
+      }
+    }
+    let fractional = null;
+    if (fps === 25 || fps === 50) {
+      fractional = false;
+    } else if ((fps === 24 || fps === 30 || fps === 60) && winner && medianSpan != null) {
+      const expected = 79 * winner.dec.samplesPerBit;
+      fractional = (medianSpan / expected) >= 1.0005;
+    }
+    let carrierRate = null;
+    if (fps === 25) carrierRate = "25";
+    else if (fps === 50) carrierRate = "50";
+    else if (fractional != null) {
+      if (fps === 24) carrierRate = fractional ? "23.976" : "24";
+      else if (fps === 30) carrierRate = fractional ? "29.97" : "30";
+      else if (fps === 60) carrierRate = fractional ? "59.94" : "60";
+    }
+    this._carrierObs = { nominalFps: fps, fractional, medianSpan, carrierRate };
+    return this._carrierObs;
   }
 
   // Counting-cadence readout from the FF-sequence observer. Returns
@@ -444,13 +526,13 @@ export class MultiRateDecoder {
     // not 29.97.
     const isFractional = this._carrierIsFractional() === true;
     const actualFps = fps / (isFractional ? 1.001 : 1);
-    const cutoff = now - windowSec * 1000;
+    const cutoff = now - effectiveWindowSec * 1000;
     let count = 0;
     for (let i = times.length - 1; i >= 0; i--) {
       if (times[i] >= cutoff) count++;
       else break; // recentDecodeTimes is appended in chronological order
     }
-    const expected = windowSec * actualFps;
+    const expected = effectiveWindowSec * actualFps;
     if (expected <= 0) return null;
     return Math.max(0, Math.min(100, 100 * (1 - count / expected)));
   }
