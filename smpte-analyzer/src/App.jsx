@@ -636,9 +636,9 @@ export default function SMPTEAnalyzer() {
   const sourceRef = useRef(null);
   const rafRef = useRef(null);
   const peakDecayRef = useRef(-60);
+  const peakHoldUntilRef = useRef(0);
   const lastErrSigRef = useRef("");
   const lastBreakTRef = useRef(0);
-  const [recentBreaks, setRecentBreaks] = useState([]);
   const sessionStartRef = useRef(Date.now());
   const publisherRef = useRef(null);
   const tickRef = useRef(null);
@@ -841,6 +841,7 @@ export default function SMPTEAnalyzer() {
         rate: rateKey,
         errors: [...data.errors],
         levelDbFS: +lvl.toFixed(2),
+        snr: Number.isFinite(data.snr) ? +data.snr.toFixed(1) : null,
         source: useRealAudio ? "live" : "sim",
       });
     }
@@ -856,22 +857,14 @@ export default function SMPTEAnalyzer() {
     const lb = data.lastBreak;
     if (lb && lb.t !== lastBreakTRef.current) {
       lastBreakTRef.current = lb.t;
-      const snapshot = {
-        t: Date.now(),
-        type: lb.type,
-        delta: lb.delta,
-        from: lb.from,
-        to: lb.to,
-        snr: Number.isFinite(data.snr) ? data.snr : null,
-        levelDbFS: Number.isFinite(lvl) ? lvl : null,
-      };
-      setRecentBreaks(prev => [snapshot, ...prev].slice(0, 8));
       pushLog({
         t: Date.now(),
         tc: lb.to,
+        from: lb.from,
         rate: rateKey,
         errors: [`TC_${lb.type}`, `${lb.delta > 0 ? "+" : ""}${lb.delta}`],
         levelDbFS: +lvl.toFixed(2),
+        snr: Number.isFinite(data.snr) ? +data.snr.toFixed(1) : null,
         source: useRealAudio ? "live" : "sim",
       });
       if (publisherRef.current) {
@@ -900,8 +893,16 @@ export default function SMPTEAnalyzer() {
       });
     }
 
-    // Peak hold with decay
-    peakDecayRef.current = Math.max(peakDecayRef.current - 0.3, data.peakDbFS);
+    // Peak hold: latch on any new equal-or-higher peak and hold for 7 s,
+    // then decay fast (~30 dB/s) so a real drop in level becomes visible
+    // rather than the marker sitting pinned to a value the bar already shows.
+    const nowMs = performance.now();
+    if (data.peakDbFS >= peakDecayRef.current) {
+      peakDecayRef.current = data.peakDbFS;
+      peakHoldUntilRef.current = nowMs + 7000;
+    } else if (nowMs >= peakHoldUntilRef.current) {
+      peakDecayRef.current = Math.max(peakDecayRef.current - 1.0, data.peakDbFS);
+    }
     setPeakHold(peakDecayRef.current);
   }, [rateKey, levelDbFS, noiseLevel, dropoutProb, useRealAudio, bootstrapping]);
 
@@ -914,6 +915,7 @@ export default function SMPTEAnalyzer() {
     setAnalysis(null);
     setPeakHold(-60);
     peakDecayRef.current = -60;
+    peakHoldUntilRef.current = 0;
   }, [useRealAudio]);
 
   // Attempt to start in live audio mode on first load. If the browser blocks
@@ -1183,9 +1185,9 @@ export default function SMPTEAnalyzer() {
   }
 
   function exportCSV() {
-    const header = "timestamp,timecode,rate,source,levelDbFS,errors";
+    const header = "timestamp,timecode,from,rate,source,levelDbFS,snrDb,errors";
     const rows = sessionLog.map(e =>
-      `${new Date(e.t).toISOString()},${e.tc},${e.rate},${e.source},${e.levelDbFS},${e.errors.join("|")}`
+      `${new Date(e.t).toISOString()},${e.tc},${e.from ?? ""},${e.rate},${e.source},${e.levelDbFS},${e.snr ?? ""},${e.errors.join("|")}`
     );
     downloadFile(`ltc-session-${Date.now()}.csv`, "text/csv", [header, ...rows].join("\n"));
   }
@@ -1466,7 +1468,7 @@ export default function SMPTEAnalyzer() {
         {/* Level Section */}
         <div className="panel-level" style={{ ...PANEL, padding:14, display:"flex", flexDirection:"column", gap:6 }}>
           <div style={{ fontSize:11, color:"#ff9900", letterSpacing:3 }}>SIGNAL LEVEL</div>
-          <LevelMeter label="RMS" value={analysis?.levelDbFS ?? levelDbFS} peak={peakHold} />
+          <LevelMeter label="RMS" value={analysis?.levelDbFS ?? levelDbFS} />
           <LevelMeter label="PEAK" value={analysis?.peakDbFS ?? levelDbFS + 2} peak={peakHold} />
           <div style={{ height:"1px", background:"#111" }} />
           <Gauge label="SNR" value={analysis?.snr} min={0} max={80} unit=" dB"
@@ -1775,49 +1777,6 @@ export default function SMPTEAnalyzer() {
                 );
               })()}
             </div>
-            {recentBreaks.length > 0 && (
-              <div style={{ marginTop:4 }}>
-                <div style={{ fontSize:10, color:"#555", letterSpacing:2, marginBottom:6, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-                  <span>BREAK DETAIL · LAST {recentBreaks.length}</span>
-                  <button
-                    onClick={() => setRecentBreaks([])}
-                    style={{ background:"transparent", border:"1px solid #333", color:"#666", fontSize:9, letterSpacing:1, padding:"2px 6px", cursor:"pointer", fontFamily:"monospace" }}>
-                    CLEAR
-                  </button>
-                </div>
-                <div style={{ display:"grid", gridTemplateColumns:"auto auto 1fr auto auto", gap:"4px 10px", fontSize:11, fontFamily:"monospace", color:"#888" }}>
-                  <span style={{ color:"#444", letterSpacing:1 }}>AGE</span>
-                  <span style={{ color:"#444", letterSpacing:1 }}>TYPE</span>
-                  <span style={{ color:"#444", letterSpacing:1 }}>FROM → TO</span>
-                  <span style={{ color:"#444", letterSpacing:1, textAlign:"right" }}>SNR</span>
-                  <span style={{ color:"#444", letterSpacing:1, textAlign:"right" }}>LEVEL</span>
-                  {recentBreaks.map((b, i) => {
-                    const ageSec = (Date.now() - b.t) / 1000;
-                    const ageStr = ageSec < 60 ? `${ageSec.toFixed(0)}s` : `${Math.floor(ageSec/60)}m${Math.floor(ageSec%60).toString().padStart(2,"0")}s`;
-                    const typeColor = b.type === "REPEAT" ? "#22d3ee" : b.type === "REWIND" ? "#ff6600" : "#ffaa00";
-                    const sign = b.delta > 0 ? "+" : "";
-                    return (
-                      <React.Fragment key={`${b.t}-${i}`}>
-                        <span style={{ color:"#666" }}>{ageStr}</span>
-                        <span style={{ color:typeColor }}>{b.type} {sign}{b.delta}</span>
-                        <span style={{ color:"#888" }}>{b.from} → {b.to}</span>
-                        <span style={{ color: b.snr == null ? "#444" : b.snr < 10 ? "#ff6600" : "#888", textAlign:"right" }}>
-                          {b.snr == null ? "—" : `${b.snr.toFixed(1)}dB`}
-                        </span>
-                        <span style={{ color:"#888", textAlign:"right" }}>
-                          {b.levelDbFS == null ? "—" : `${b.levelDbFS.toFixed(1)}dBFS`}
-                        </span>
-                      </React.Fragment>
-                    );
-                  })}
-                </div>
-                <div style={{ fontSize:10, color:"#333", letterSpacing:1, marginTop:6, lineHeight:1.5 }}>
-                  REPEAT +0 / small JUMP at steady cadence → likely decoder edge case.
-                  Random JUMPs with SNR dip → real signal corruption.
-                  Large JUMP once → source seek / re-thread.
-                </div>
-              </div>
-            )}
             <div style={{ fontSize:10, color:"#333", letterSpacing:1, marginTop:4 }}>
               Auto-detecting from biphase bit rate (24 / 25 / 30 / 50 / 60 candidates run in parallel).
               NDF vs DF resolved from the frame's drop-frame flag.
@@ -1909,6 +1868,7 @@ export default function SMPTEAnalyzer() {
                   <th style={{ padding:"4px 12px", fontWeight:"normal" }}>RATE</th>
                   <th style={{ padding:"4px 12px", fontWeight:"normal" }}>SRC</th>
                   <th style={{ padding:"4px 12px", fontWeight:"normal", textAlign:"right" }}>LEVEL</th>
+                  <th style={{ padding:"4px 12px", fontWeight:"normal", textAlign:"right" }}>SNR</th>
                   <th style={{ padding:"4px 12px", fontWeight:"normal" }}>ERRORS</th>
                 </tr>
               </thead>
@@ -1916,10 +1876,15 @@ export default function SMPTEAnalyzer() {
                 {[...sessionLog].reverse().map((e, i) => (
                   <tr key={sessionLog.length - i} style={{ borderTop:"1px solid #111", color:"#999" }}>
                     <td style={{ padding:"3px 12px", color:"#555" }}>{new Date(e.t).toLocaleTimeString()}</td>
-                    <td style={{ padding:"3px 12px", color:"#00ff88" }}>{e.tc}</td>
+                    <td style={{ padding:"3px 12px", color:"#00ff88" }}>
+                      {e.from ? <>{e.from} <span style={{color:"#555"}}>→</span> {e.tc}</> : e.tc}
+                    </td>
                     <td style={{ padding:"3px 12px", color:"#666" }}>{e.rate}</td>
                     <td style={{ padding:"3px 12px", color: e.source === "live" ? "#00ff88" : "#666" }}>{e.source}</td>
                     <td style={{ padding:"3px 12px", color:"#888", textAlign:"right" }}>{e.levelDbFS} dBFS</td>
+                    <td style={{ padding:"3px 12px", color: e.snr == null ? "#333" : e.snr < 10 ? "#ff6600" : "#888", textAlign:"right" }}>
+                      {e.snr == null ? "—" : `${e.snr.toFixed(1)} dB`}
+                    </td>
                     <td style={{ padding:"3px 12px", color:"#ff3b3b" }}>{e.errors.join(" · ")}</td>
                   </tr>
                 ))}
