@@ -519,7 +519,8 @@ function SpecRefPanel() {
         mark's spectral nulls — frequencies exactly halfway between
         consecutive LTC harmonics — where the signal has no energy by
         construction. Computed only when locked; "—" otherwise. Display is
-        EMA-smoothed (~1 Hz) to reduce per-tick jitter.
+        EMA-smoothed (alpha 0.025, ~0.5 Hz effective bandwidth, ~2 s settle)
+        to reduce per-tick jitter.
         <br/><span style={{color:"#777"}}>Expected for LTC:</span>{" "}
         clean source 20–30 dB,
         moderately noisy 10–20 dB,
@@ -604,10 +605,14 @@ function SpecRefPanel() {
         <br/><span style={{color:"#777"}}>REWIND</span> — TC went backwards
         (delta &lt; 0). From player rewinds, freewheel resets, or non-
         monotonic generators.
-        <br/>The break counter persists until lock is lost for ≥500 ms; gaps
-        from temporary signal loss do not count. Each break is also written
-        to the session log and broadcast over the API publisher as a
-        `continuity` message.
+        <br/>The LIVE INPUT STATUS readout (`CONTINUITY · 60s`) counts
+        breaks over a rolling 60-second window — older breaks scroll off
+        the live count but stay in the session log. Gaps of ≥500 ms
+        between decoded frames reset continuity *tracking* without
+        producing a spurious JUMP across the gap; gaps of ≥3 s additionally
+        clear the underlying break counter on the resuming frame (a long
+        signal stop is treated as the start of a new run). Each break is
+        also broadcast over the API publisher as a `continuity` message.
       </div>
     </div>
   );

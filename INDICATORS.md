@@ -64,7 +64,7 @@ hide; they show their dim state so the layout stays stable.
 | Indicator | Live source | Notes |
 |---|---|---|
 | **RMS** meter | `20·log₁₀(computeRMS(buf))` on the live time-domain buffer | dBFS |
-| **PEAK** meter | `20·log₁₀(computePeak(buf))` on the live time-domain buffer | dBFS. Peak-hold bar decays at 0.3 dB/tick |
+| **PEAK** meter | `20·log₁₀(computePeak(buf))` on the live time-domain buffer | dBFS. Peak-hold marker latches only on a strictly higher peak, holds for 10 s, then decays toward current at ~20 dB/s. Equal-or-lower peaks do **not** reset the timer (otherwise LTC's stable per-edge transients would pin the marker forever) |
 | **SNR** gauge | `computeLtcSpectralMetrics()` — total signal-band power [0.4–1.6×bitRate] vs noise-floor power projected across that same band. Noise floor sampled at biphase spectral nulls `(h+0.5)×f1`. | In dB. **Computed only when locked.** `—` otherwise. EMA-smoothed (~0.5 Hz). Gauge thresholds: ≥15 green, 10–15 orange, <10 red. (Numbers are lower than classical audio SNR because Blackman-window leakage limits the measurable floor.) |
 | **THD** gauge | `computeLtcSpectralMetrics()` — `√(P3+P5+P7)/√(P1)×100` for 3rd/5th/7th odd harmonics of `bitRate/2` fundamental. | In %. **Computed only when locked.** `—` otherwise. EMA-smoothed. LTC ideal ≈38%; above that indicates added distortion. Gauge thresholds: ≤50% green, 50–70% orange, >70% red. |
 | **NOISE FLOOR** readout | `10·log₁₀(median null-bin linear power)` — median of bins at biphase spectral nulls `(h+0.5)×f1` | In dB. **Computed only when locked.** `—` otherwise. EMA-smoothed. |
@@ -78,17 +78,23 @@ clip ≥ −1 dBFS · hot ≥ −6 · nominal −18 · low < −30 · dropout < 
 
 The `MultiRateDecoder` runs five `LtcDecoder` instances in parallel at
 candidate fps 24, 25, 30, 50, 60. The winner is the one with the highest
-recent score:
+**windowed** score:
 
 ```
-score = framesDecoded - bitErrors × 0.1 + (recencyBonus 1000 if frame < 500 ms old)
+score = framesDecodedInLast20s + (recencyBonus 1000 if frame < 500 ms old)
 ```
+
+The window matters: cumulative scoring kept the previous winner in front
+for ~60 s after the input rate changed on the same device, because the
+old decoder had thousands of accumulated frames while the new correct
+decoder had thousands of accumulated *bit errors* from running against
+the wrong rate. A windowed count decays naturally across the change.
 
 | Indicator | Source |
 |---|---|
-| Per-rate bar (each row) | Real `framesDecoded` of that candidate decoder. Reaches 100% width at ≈60 clean frames (~2 s) |
+| Per-rate bar (each row) | Real `framesDecoded` of that candidate decoder. Reaches 100% width at ≈60 clean frames (~2 s). Cumulative — does **not** decay |
 | Active rate dot (green ●) | The winner's mapped rate key (`detectedRateKey()`), including DF/NDF resolved from the parsed `dropFrame` flag |
-| **CONFIDENCE** bar | `100 × framesDecoded / (framesDecoded + bitErrors + 1)`, capped at 99.5% |
+| **CONFIDENCE** bar | `100 − dropoutPct(2 s window)`, clamped 0–99.5 (falls back to 25 for the first ~0.5 s before the window has data). Tracks **recent** decode quality so it self-clears within a couple of seconds after a rate change, rather than waiting ~60 s for cumulative bit-error counts to wash out |
 
 In sim mode there are no real candidate scores; only the picked rate's bar
 shows, scaled by the sim's confidence proxy.
@@ -112,7 +118,7 @@ Tooltips show bit index, sync-word membership, and decoded value.
 
 | Below-grid readout | Source |
 |---|---|
-| `N cumulative bit errors` | `MultiRateDecoder.bitErrors` — total intervals from the winner decoder that fell outside the biphase tolerance window |
+| `N cumulative bit errors` | `MultiRateDecoder.bitErrors` — total intervals from the winner decoder that the recovered bit-clock classifier could not assign to either a short (half-bit-cell) or long (full-bit-cell) slot |
 | `no frame decoded yet` | Shown when `lastFrameBits` is null |
 
 ### Sub-readouts
@@ -163,7 +169,7 @@ sim's purpose.
 | **SAMPLE RATE** | `audioContext.sampleRate` (Hz) for live mic input. When a file is playing: `{fileNativeRate} Hz file · {ctx.sampleRate} Hz decoded` — the native rate is parsed from the WAV RIFF header by `readWavSampleRate()`; non-WAV files show only the decoded rate |
 | **CLOCK DRIFT** | `MultiRateDecoder.driftPpm()`, EMA-smoothed. Deviation of measured frame period from exact expected SMPTE rate, in ppm. `—` until 10 decoded frames. States: `SOLID` (<5 ppm, green) · `DRIFTING` (5–50 ppm, orange) · `OFF-RATE` (>50 ppm, red) |
 | **DROPOUT RATE** | `MultiRateDecoder.dropoutPct(2)`, EMA-smoothed. Percentage of expected frames not decoded over a rolling 2-second window: `100 × (1 − decoded / (window_sec × detected_fps))`. `—` until the winner is established. States: `CLEAN` (<1%, green) · `OCCASIONAL` (1–10%, orange) · `FREQUENT` (10–50%, amber) · `SEVERE` (>50%, red) |
-| **CONTINUITY** | Count of frames where `HH:MM:SS:FF` did not advance by exactly one frame (drop-frame rules applied). `—` when not locked. Green `● CONTINUOUS · 0 BREAKS` when clean. Amber `N BREAKS · last: TYPE ±Δ @ HH:MM:SS:FF` otherwise. Break types — `REPEAT` (delta = 0, freeze frame), `JUMP` (delta > 1, edit splice / dropout), `REWIND` (delta < 0, rewind / freewheel reset). Gaps ≥ 500 ms between decoded frames reset continuity tracking rather than producing a spurious JUMP. |
+| **CONTINUITY · 60s** | Count of frames in a **rolling 60-second window** where `HH:MM:SS:FF` did not advance by exactly one frame (drop-frame rules applied). Green `● CONTINUOUS · 0 BREAKS` when clean. Amber `N BREAKS · last: TYPE ±Δ @ HH:MM:SS:FF` when at least one break is in-window (the `last: …` detail is shown only when `lastBreak` itself is within the 60 s window). Break types — `REPEAT` (delta = 0, freeze frame), `JUMP` (delta > 1, edit splice / dropout), `REWIND` (delta < 0, rewind / freewheel reset). The full break history is still in the session log. Gaps ≥ 500 ms between decoded frames reset continuity *tracking* (not the counter) to avoid a spurious JUMP across the gap; gaps ≥ 3 s also clear the break counter on the resuming frame, on the basis that a long signal stop starts a new run. |
 
 ---
 

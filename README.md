@@ -175,7 +175,7 @@ In biphase mark coding:
 - A **`1` bit** has an additional transition at the mid-point of the bit cell
 - A **`0` bit** has no mid-point transition
 
-The decoder measures the time between transitions. A short interval (≈ half bit-cell) indicates a `1`; a long interval (≈ full bit-cell) indicates a `0`. Intervals that fall outside the valid range (±15% tolerance) are flagged as bit errors. A frame-span sanity check additionally rejects any 80-bit sequence whose total sample span deviates more than ±3% from the expected span for the candidate rate — this catches 24 vs 25 fps cross-locks that per-interval tolerance alone cannot separate.
+The decoder measures the time between transitions and classifies each interval as **short** (≈ half bit-cell, `1`) or **long** (≈ full bit-cell, `0`) using a recovered bit-clock model rather than a fixed tolerance window. A running estimate of the actual bit period (`sbEst`) is updated on every long interval, and each new interval is assigned to whichever expected value — `sbEst` or `2·sbEst` — it is closer to. Intervals that the classifier cannot confidently bucket are flagged as bit errors. This mirrors how hardware LTC chips behave once locked: they track the recovered bit clock and decide bit slots by phase, not by independent interval measurement against a fixed nominal. A frame-span sanity check additionally rejects any 80-bit sequence whose total sample span deviates more than ±3% from the expected span for the candidate rate — this catches 24 vs 25 fps cross-locks that per-interval classification alone cannot separate.
 
 ---
 
@@ -213,7 +213,7 @@ The analyzer checks that every decoded frame advances the timecode by exactly on
 | JUMP | > 1 | TC advanced by more than one frame — edit splice, dropout, or skip |
 | REWIND | < 0 | TC went backwards — player rewind, freewheel reset, or non-monotonic generator |
 
-The break count and the most recent break detail are shown in the LIVE INPUT STATUS panel. Gaps of 500 ms or more between decoded frames reset continuity tracking rather than producing a spurious JUMP. Each break is also written to the session log and published over the API as a `{type:"continuity"}` message.
+The LIVE INPUT STATUS panel shows the break count over a **rolling 60-second window** (`CONTINUITY · 60s`), along with the most recent break detail when that break itself is still within the window. Older breaks scroll off the live count but remain in the session log. Gaps of 500 ms or more between decoded frames reset continuity tracking rather than producing a spurious JUMP across the gap; gaps of 3 s or more additionally clear the break counter on the resuming frame, treating a long signal stop as the start of a new run. Each break is also written to the session log and published over the API as a `{type:"continuity"}` message.
 
 ---
 
