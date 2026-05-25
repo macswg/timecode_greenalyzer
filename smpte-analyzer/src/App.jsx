@@ -554,15 +554,15 @@ function SpecRefPanel() {
       </div>
       <div style={{ marginTop:12, color:"#ff9900", letterSpacing:2, fontSize:13 }}>SAMPLE RATE</div>
       <div style={{ color:"#555" }}>
-        Two readings of the input's sample rate.
+        <span style={{color:"#777"}}>measured</span> — the true sample-delivery
+        rate, counted from the capture worklet over wall-clock time. This is
+        the ground truth: it's what's actually arriving at the decoder.
         <br/><span style={{color:"#777"}}>nominal</span> — the device's declared
-        rate (browser getSettings().sampleRate, else the audio engine's fixed
-        rate); a reported integer, updates per connected input.
-        <br/><span style={{color:"#777"}}>measured</span> — the true sample-delivery
-        rate, counted from the capture worklet over wall-clock time.
-        <br/>Web Audio resamples the input into one long-lived context, so
-        measured tracks the context clock; a gap between the two usually means
-        the OS is resampling the device, not a fault.
+        rate from browser getSettings().sampleRate. Only shown when it
+        disagrees with measured (the OS is resampling the input), in which case
+        the readout is flagged <span style={{color:"#ffaa00"}}>RESAMPLED</span>.
+        When measured and nominal agree there's nothing to compare so only
+        measured is shown.
       </div>
       <div style={{ marginTop:12, color:"#ff9900", letterSpacing:2, fontSize:13 }}>CLOCK DRIFT (ppm)</div>
       <div style={{ color:"#555" }}>
@@ -1794,13 +1794,41 @@ export default function SMPTEAnalyzer() {
               <span style={{ color:"#555", letterSpacing:2 }}>BIT ERRORS</span>
               <span style={{ color: (analysis?.bitErrors ?? 0) > 0 ? "#ff9900" : "#ccc" }}>{analysis?.bitErrors ?? 0}</span>
               <span style={{ color:"#555", letterSpacing:2 }}>SAMPLE RATE</span>
-              <span style={{ color:"#666" }}>
-                {playingFile?.nativeSampleRate
-                  ? `${playingFile.nativeSampleRate} Hz file · ${playingFile.decoderSampleRate} Hz decoded`
-                  : ltcLocked && measuredSampleRate != null
-                    ? `${measuredSampleRate} Hz measured · ${deviceSampleRate || sampleRateRef.current} Hz nominal`
-                    : `— measured · ${deviceSampleRate || sampleRateRef.current} Hz nominal`}
-              </span>
+              {(() => {
+                if (playingFile?.nativeSampleRate) {
+                  return (
+                    <span style={{ color:"#666" }}>
+                      {playingFile.nativeSampleRate} Hz file · {playingFile.decoderSampleRate} Hz decoded
+                    </span>
+                  );
+                }
+                // Live path. `measured` is the ground truth — samples actually
+                // delivered per second. `nominal` is what the device reports
+                // via getSettings().sampleRate; only shown when it diverges
+                // from measured (i.e. the OS is resampling the input). The
+                // old code fell back to the AudioContext's rate when
+                // getSettings was unavailable, which displayed a misleading
+                // "48000 Hz nominal" that was really just the context rate.
+                const measured = ltcLocked ? measuredSampleRate : null;
+                const nominal = deviceSampleRate;
+                const diverges = measured != null && nominal != null
+                  && Math.abs(measured - nominal) > 10;
+                if (measured == null) {
+                  return (
+                    <span style={{ color:"#666" }}>
+                      — measured{nominal != null ? ` · ${nominal} Hz nominal` : ""}
+                    </span>
+                  );
+                }
+                if (diverges) {
+                  return (
+                    <span style={{ color:"#ffaa00" }}>
+                      {measured} Hz measured · {nominal} Hz nominal · RESAMPLED
+                    </span>
+                  );
+                }
+                return <span style={{ color:"#666" }}>{measured} Hz measured</span>;
+              })()}
               <span style={{ color:"#555", letterSpacing:2 }}>CLOCK DRIFT</span>
               {(() => {
                 const d = analysis?.driftPpm;
