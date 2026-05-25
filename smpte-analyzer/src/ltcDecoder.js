@@ -442,6 +442,13 @@ export class MultiRateDecoder {
   // is 1581.58 samples per 79-bit span). The median snaps to the nearest
   // integer sample, producing several-hundred-ppm bias; the mean recovers
   // sub-sample precision by averaging across the natural integer jitter.
+  //
+  // Note: switching to the bit-clock recovery estimate (`sbEst`) was tried
+  // and reverted — it's updated per long interval (one bit period) and so
+  // integer-sample quantization on individual long intervals dominates,
+  // giving ~3× more peak-to-peak noise than the frame-span mean. Each
+  // frame-span measurement averages 79 bit periods, so √79 ≈ 9× of integer
+  // noise washes out before the cross-frame averaging even starts.
   driftPpm() {
     const winner = this.winner;
     if (!winner) return null;
