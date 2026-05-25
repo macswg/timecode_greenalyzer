@@ -344,7 +344,7 @@ function LevelMeter({ label, value, peak, min=-60, max=0 }) {
   );
 }
 
-function StatusBadge({ label, active, color="#ff3b3b", warn=false }) {
+function StatusBadge({ label, active, color="#ff3b3b", warn=false, count=null }) {
   return (
     <div style={{
       padding:"4px 10px",
@@ -361,6 +361,11 @@ function StatusBadge({ label, active, color="#ff3b3b", warn=false }) {
     }}>
       {active && <span style={{marginRight:4, animation: warn?"blink 0.5s step-end infinite":"none"}}>●</span>}
       {label}
+      {count != null && count > 0 && (
+        <span style={{ marginLeft:6, fontSize:11, fontWeight:400, color: active ? color : "#555" }}>
+          {count}
+        </span>
+      )}
     </div>
   );
 }
@@ -635,6 +640,7 @@ export default function SMPTEAnalyzer() {
   const [peakHold, setPeakHold] = useState(-60);
   const [frameCount, setFrameCount] = useState(0);
   const [errorCount, setErrorCount] = useState(0);
+  const [errorCounts, setErrorCounts] = useState({ CLIP:0, HOT:0, LOW:0, DROPOUT:0, NOISE:0 });
   const [sessionLog, setSessionLog] = useState([]);
   const audioCtxRef = useRef(null);
   const analyserRef = useRef(null);
@@ -849,7 +855,14 @@ export default function SMPTEAnalyzer() {
     }
     setAnalysis(data);
     setFrameCount(c => c + 1);
-    if (data.errors.length > 0) setErrorCount(c => c + 1);
+    if (data.errors.length > 0) {
+      setErrorCount(c => c + 1);
+      setErrorCounts(prev => {
+        const next = { ...prev };
+        for (const e of data.errors) if (e in next) next[e] = next[e] + 1;
+        return next;
+      });
+    }
 
     const sig = data.errors.join(",");
     const tcStr = formatTc(data.hh, data.mm, data.ss, data.ff, data.dropFrame);
@@ -1186,6 +1199,7 @@ export default function SMPTEAnalyzer() {
   function clearLog() {
     setSessionLog([]);
     setErrorCount(0);
+    setErrorCounts({ CLIP:0, HOT:0, LOW:0, DROPOUT:0, NOISE:0 });
     lastErrSigRef.current = "";
     sessionStartRef.current = Date.now();
   }
@@ -1480,6 +1494,7 @@ export default function SMPTEAnalyzer() {
             active={analysis?.errors?.includes(e)}
             color={e==="CLIP"?"#ff0000":e==="HOT"?"#ff6600":e==="LOW"?"#ff9900":e==="DROPOUT"?"#ff3399":"#cc88ff"}
             warn={true}
+            count={errorCounts[e]}
           />
         ))}
         <div style={{ marginLeft:"auto", fontSize:11, fontFamily:"monospace", color: hasErrors ? "#ff3b3b" : "#00ff88", alignSelf:"center", letterSpacing:2 }}>
