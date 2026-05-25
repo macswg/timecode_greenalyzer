@@ -624,6 +624,14 @@ export default function SMPTEAnalyzer() {
   const currentSigTicksRef = useRef(0);
   const currentSigFlushTickRef = useRef(0);
   const lastBreakTRef = useRef(0);
+  // Edge-trigger ref for carrier-measurement events (MEASURING_COMMIT,
+  // RATE_CHANGE, DIVERGENCE). Watches lastCarrierEvent.t for change so we
+  // log each transition exactly once.
+  const lastCarrierEventTRef = useRef(0);
+  // Carrier-snapshot heartbeat: emits a CARRIER_SNAPSHOT log entry every 30 s
+  // with the current measurement + drift numbers, so post-show analysis has
+  // a continuous audit trail even when nothing surface-level was wrong.
+  const lastSnapshotTRef = useRef(0);
   // Most recently logged detected rate key, so we only push a log entry on
   // transitions (e.g. 29.97df → 30 carrier flip) rather than every tick.
   const lastLoggedRateRef = useRef(null);
@@ -669,6 +677,7 @@ export default function SMPTEAnalyzer() {
   // moment code stops. Reset on mode switch or source teardown.
   const lastSeenCarrierRef = useRef(null);
   const lastSeenCadenceRef = useRef(null);
+  const [auditExpanded, setAuditExpanded] = useState(false);
   const [measuredSampleRate, setMeasuredSampleRate] = useState(null);
   // The current device's reported native rate (track.getSettings().sampleRate).
   // Unlike the reused AudioContext's fixed rate, this updates per input.
@@ -715,7 +724,7 @@ export default function SMPTEAnalyzer() {
   //           detected). Rendered green.
   //   error — actual problems (level, decode, continuity). Rendered red.
   // Continuity breaks use `TC_<TYPE>` so we match by prefix as well.
-  const INFO_TAGS = new Set(["LOCK_ACQUIRED"]);
+  const INFO_TAGS = new Set(["LOCK_ACQUIRED", "MEASURING_COMMIT", "CARRIER_SNAPSHOT"]);
   function logEntryClass(e) {
     const lead = e.errors?.[0];
     if (lead && INFO_TAGS.has(lead)) return "info";
@@ -870,6 +879,17 @@ export default function SMPTEAnalyzer() {
       data.carrierRate = dec?.carrierRate() ?? null;
       data.cadence = dec?.cadence() ?? null;
       data.carrierCadenceMismatch = dec?.carrierCadenceMismatch() ?? null;
+      // Rich carrier observation for the AUDIT panel: measured fps with σ,
+      // window n / spanSec, commit confidence, clock-resolution probe.
+      // See ltcDecoder.js carrierObservation().
+      data.carrierObs = dec?.carrierObservation() ?? null;
+      // State-machine events (MEASURING_COMMIT / RATE_CHANGE / DIVERGENCE),
+      // surfaced for session-log writing. Same pattern as lastBreak.
+      data.lastCarrierEvent = dec?.lastCarrierEvent ?? null;
+      // Dual drift readouts: source-vs-host-quartz is the primary, source-vs-
+      // ADC plus the derived capture-clock error are for the audit panel.
+      data.driftPpmSourceVsAdc = dec?.driftPpmSourceVsAdc() ?? null;
+      data.captureClockErrorPpm = dec?.captureClockErrorPpm() ?? null;
       data.framesDecoded = dec?.framesDecoded ?? 0;
       data.bitErrors = dec?.bitErrors ?? 0;
       data.lastFrameBits = dec?.lastFrameBits ?? null;
@@ -1053,6 +1073,75 @@ export default function SMPTEAnalyzer() {
         // detRate snapped back to the committed value before the debounce
         // window elapsed — discard the pending change.
         pendingRateRef.current = { rate: null, since: 0 };
+      }
+    }
+
+    // Carrier-measurement events. The decoder emits MEASURING_COMMIT (first
+    // commit after acquire), RATE_CHANGE (carrier flipped between integer/
+    // fractional after re-measurement), and DIVERGENCE (detector window
+    // disagreed with stable, classification dropped to MEASURING). These are
+    // edge-triggered on lastCarrierEvent.t. The pre-existing detectedRateKey
+    // RATE_CHANGE handler above still logs basic rate flips for back-compat,
+    // but the rich metadata (σ, n, spanSec) only lives on these entries.
+    const ce = data.lastCarrierEvent;
+    if (useRealAudio && ce && ce.t !== lastCarrierEventTRef.current) {
+      lastCarrierEventTRef.current = ce.t;
+      const fpsLabel = ce.fps != null
+        ? (ce.fractional ? `${ce.fps}/1.001` : `${ce.fps}`)
+        : "—";
+      const baseEntry = {
+        t: Date.now(),
+        tc: tcStr,
+        rate: data.detectedRateKey ?? fpsLabel,
+        levelDbFS: +lvl.toFixed(2),
+        snr: Number.isFinite(data.snr) ? +data.snr.toFixed(1) : null,
+        source: "live",
+      };
+      if (ce.type === "MEASURING_COMMIT" || ce.type === "RATE_CHANGE") {
+        pushLog({
+          ...baseEntry,
+          errors: [ce.type, fpsLabel,
+            `σ=${ce.sigmaFps != null ? (ce.sigmaFps * 1e6 / ce.fps).toFixed(1) + "ppm" : "—"}`,
+            `n=${ce.windowFrames ?? "—"}`,
+            `${ce.windowSeconds != null ? ce.windowSeconds.toFixed(1) + "s" : "—"}`,
+          ],
+        });
+      } else if (ce.type === "DIVERGENCE") {
+        pushLog({
+          ...baseEntry,
+          errors: ["DIVERGENCE",
+            `committed=${ce.committedFractional ? "fractional" : "integer"}`,
+            `detector=${ce.detectorFractional ? "fractional" : "integer"}`,
+            `detector_fps=${ce.detectorFps?.toFixed(3) ?? "—"}`,
+          ],
+        });
+      }
+    }
+
+    // CARRIER_SNAPSHOT heartbeat. Emits an audit-trail entry every 30 s of
+    // wall-clock so post-show analysis has a continuous record of measured
+    // fps, σ, drift, and dropout — independent of whether anything alerted.
+    if (useRealAudio && data.carrierObs?.fractional != null) {
+      const tNow = Date.now();
+      if (tNow - lastSnapshotTRef.current >= 30000) {
+        lastSnapshotTRef.current = tNow;
+        const obs = data.carrierObs;
+        pushLog({
+          t: tNow,
+          tc: tcStr,
+          rate: data.detectedRateKey ?? "—",
+          errors: ["CARRIER_SNAPSHOT",
+            `fps=${obs.stable?.fps.toFixed(5) ?? "—"}`,
+            `σ=${obs.stable?.sigmaFps != null ? (obs.stable.sigmaFps * 1e6 / obs.nominalFps).toFixed(2) + "ppm" : "—"}`,
+            `n=${obs.stable?.n ?? "—"}`,
+            `host=${Number.isFinite(data.driftPpm) ? data.driftPpm.toFixed(1) + "ppm" : "—"}`,
+            `adc=${Number.isFinite(data.driftPpmSourceVsAdc) ? data.driftPpmSourceVsAdc.toFixed(1) + "ppm" : "—"}`,
+            `drop=${Number.isFinite(data.dropoutPct) ? data.dropoutPct.toFixed(1) + "%" : "—"}`,
+          ],
+          levelDbFS: +lvl.toFixed(2),
+          snr: Number.isFinite(data.snr) ? +data.snr.toFixed(1) : null,
+          source: "live",
+        });
       }
     }
 
@@ -1731,7 +1820,17 @@ export default function SMPTEAnalyzer() {
             const isDf = liveMode ? (cad?.dropFrame === true) : simIsDf;
             const rateColor = isDf ? "#ffaa00" : "#3b9cff";
             const rateGlow = isDf ? "rgba(255,170,0,0.4)" : "rgba(59,156,255,0.4)";
-            const mismatch = liveMode && analysis?.carrierCadenceMismatch === true;
+            // Only raise the NON-CONFORMANT banner on high-confidence mismatches
+            // — while either side is still MEASURING the result is unsettled
+            // and not worth alarming operators about.
+            const mm = liveMode ? analysis?.carrierCadenceMismatch : null;
+            const mismatch = mm?.result === true && mm.confidence === "high";
+            // MEASURING state: locked, decoder seeing frames, but the carrier
+            // classifier has not yet committed (5σ + 3 agreements over ≥3 s).
+            // Show the timecode digits but suppress the rate label and badge it.
+            const isMeasuring = liveMode && ltcLocked && analysis?.carrierObs?.fractional == null
+              && analysis?.detectedFps != null
+              && analysis.detectedFps !== 25 && analysis.detectedFps !== 50;
             return (
           <div className="tc-meta" style={{ display:"flex", flexDirection:"column", gap:8, alignItems:"flex-end" }}>
             <div style={{
@@ -1747,7 +1846,12 @@ export default function SMPTEAnalyzer() {
                   · {cadenceLabel}
                 </span>
               )}
-              {!bootstrapping && liveMode && (ltcLocked || !haveEverDetected) && (
+              {isMeasuring && (
+                <span style={{ fontSize:11, color:"#ffaa00", letterSpacing:3, marginLeft: 8 }}>
+                  MEASURING…
+                </span>
+              )}
+              {!isMeasuring && !bootstrapping && liveMode && (ltcLocked || !haveEverDetected) && (
                 <span style={{ fontSize:11, color:"#22d3ee", letterSpacing:3, marginLeft: 8 }}>
                   {ltcLocked ? "DETECTED" : "DETECTING…"}
                 </span>
@@ -1755,7 +1859,7 @@ export default function SMPTEAnalyzer() {
             </div>
             {mismatch && (
               <div style={{ fontSize:10, color:"#ff3b3b", fontFamily:"monospace", letterSpacing:2 }}>
-                ⚠ CARRIER {analysis?.carrierRate} / CADENCE {cad?.fps}{cad?.dropFrame ? " DF" : " ND"} MISMATCH
+                ⚠ NON-CONFORMANT: {mm.reason || `carrier ${analysis?.carrierRate} / cadence ${cad?.fps}${cad?.dropFrame ? " DF" : " ND"}`}
               </div>
             )}
             {liveMode && cad && cad.dfFlagMatches === false && (
@@ -2148,6 +2252,76 @@ export default function SMPTEAnalyzer() {
             <div style={{ fontSize:10, color:"#333", letterSpacing:1, marginTop:4 }}>
               Auto-detecting from biphase bit rate (24 / 25 / 30 / 50 / 60 candidates run in parallel).
               NDF vs DF resolved from the frame's drop-frame flag.
+            </div>
+            {/* AUDIT panel: exposes the raw measurement numbers a SMPTE
+                engineer would want to audit the analyzer's conclusions.
+                Collapsed by default — primary readouts above are enough for
+                routine operation; this is for diagnostics. */}
+            <div style={{ borderTop:"1px solid #1a1a1a", marginTop:8, paddingTop:8 }}>
+              <button
+                onClick={() => setAuditExpanded(v => !v)}
+                style={{ background:"none", border:"none", color:"#888", fontFamily:"monospace",
+                         fontSize:10, letterSpacing:3, cursor:"pointer", padding:0 }}
+              >
+                {auditExpanded ? "▼" : "▶"} AUDIT
+              </button>
+              {auditExpanded && (
+                <div style={{ marginTop:8, display:"grid", gridTemplateColumns:"auto 1fr",
+                              gap:"6px 12px", fontSize:11, fontFamily:"monospace" }}>
+                  {(() => {
+                    const obs = analysis?.carrierObs;
+                    const host = analysis?.driftPpm;
+                    const adc = analysis?.driftPpmSourceVsAdc;
+                    const cap = analysis?.captureClockErrorPpm;
+                    const fmt = (v, digits = 1) => Number.isFinite(v)
+                      ? (v > 0 ? "+" : "") + v.toFixed(digits) : "—";
+                    return (
+                      <>
+                        <span style={{ color:"#555", letterSpacing:1 }}>MEASURED FPS</span>
+                        <span style={{ color:"#ccc" }}>
+                          {obs?.stable
+                            ? `${obs.stable.fps.toFixed(5)} ± ${(obs.stable.sigmaFps * 1e6 / obs.nominalFps).toFixed(2)} ppm`
+                            : "—"}
+                        </span>
+                        <span style={{ color:"#555", letterSpacing:1 }}>WINDOW</span>
+                        <span style={{ color:"#888" }}>
+                          {obs?.stable
+                            ? `${obs.stable.n} frames · ${obs.stable.spanSec.toFixed(1)} s`
+                            : "—"}
+                        </span>
+                        <span style={{ color:"#555", letterSpacing:1 }}>CLASS</span>
+                        <span style={{ color: obs?.fractional == null ? "#ffaa00" : "#00ff88" }}>
+                          {obs?.fractional == null
+                            ? `MEASURING (${obs?.agreementCount ?? 0}/${obs?.agreementsRequired ?? 3} agreements)`
+                            : `${obs.fractional ? "fractional" : "integer"} · ${obs.classConfidence}`}
+                        </span>
+                        <span style={{ color:"#555", letterSpacing:1 }}>SOURCE → HOST QUARTZ</span>
+                        <span style={{ color:"#ccc" }}>{fmt(host)} ppm</span>
+                        <span style={{ color:"#555", letterSpacing:1 }}>SOURCE → ADC</span>
+                        <span style={{ color:"#888" }}>{fmt(adc)} ppm</span>
+                        <span style={{ color:"#555", letterSpacing:1 }}>CAPTURE CLOCK ERROR</span>
+                        <span style={{ color: Math.abs(cap ?? 0) > 100 ? "#ffaa00" : "#888" }}>
+                          {fmt(cap)} ppm{Math.abs(cap ?? 0) > 100 ? " ⚠ check capture device" : ""}
+                        </span>
+                        <span style={{ color:"#555", letterSpacing:1 }}>perf.now() RES</span>
+                        <span style={{ color:"#666" }}>
+                          {obs?.clockResolutionMs != null
+                            ? `${obs.clockResolutionMs.toFixed(3)} ms`
+                            : "—"}
+                        </span>
+                      </>
+                    );
+                  })()}
+                </div>
+              )}
+              {auditExpanded && (
+                <div style={{ marginTop:8, fontSize:9, color:"#444", lineHeight:1.5 }}>
+                  Host quartz is undisciplined (typically ±50 ppm absolute). For
+                  absolute source drift you'd need an external reference. Capture-
+                  clock error is host − ADC drift with the LTC source as common
+                  reference.
+                </div>
+              )}
             </div>
           </div>
         ) : (
