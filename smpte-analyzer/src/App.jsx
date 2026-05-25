@@ -1216,7 +1216,7 @@ export default function SMPTEAnalyzer() {
     const payload = {
       sessionStart: new Date(sessionStartRef.current).toISOString(),
       exportedAt: new Date().toISOString(),
-      frameCount, errorCount,
+      frameCount, errorCount, errorCounts,
       entries: sessionLog.map(e => ({ ...e, t: new Date(e.t).toISOString() })),
     };
     downloadFile(`ltc-session-${Date.now()}.json`, "application/json", JSON.stringify(payload, null, 2));
@@ -1879,7 +1879,7 @@ export default function SMPTEAnalyzer() {
         <div className="session-toolbar" style={{ display:"flex", alignItems:"center", gap:12, padding:"10px 12px", borderBottom:"1px solid #1a1a1a", flexWrap:"wrap" }}>
           <div style={{ fontSize:11, color:"#ff9900", letterSpacing:3 }}>SESSION LOG</div>
           <div style={{ fontSize:11, color:"#555", letterSpacing:2 }}>
-            {sessionLog.length} ENTR{sessionLog.length === 1 ? "Y" : "IES"} · {errorCount} ERROR EVENTS · {frameCount} FRAMES
+            {sessionLog.length} ENTR{sessionLog.length === 1 ? "Y" : "IES"} · {errorCount} ERROR TICKS · {frameCount} FRAMES
           </div>
           <div style={{ marginLeft:"auto", display:"flex", gap:8 }}>
             {[
