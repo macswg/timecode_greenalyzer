@@ -1252,7 +1252,7 @@ export default function SMPTEAnalyzer() {
       }
       // type === "samples"
       const samples = msg.samples;
-      decoder.feed(samples, sampleRateRef.current);
+      decoder.feed(samples, sampleRateRef.current, msg.chunkWallStart, msg.chunkWallEnd);
       const sc = sampleClockRef.current;
       sc.n += samples.length;
       const now = performance.now();

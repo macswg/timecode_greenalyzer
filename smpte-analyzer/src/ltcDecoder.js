@@ -41,9 +41,17 @@ export class LtcDecoder {
     this.pendingFrames = [];        // frames decoded since the consumer last drained — needed for continuity tracking when a single audio chunk produces more than one frame
     this.sbEst = 0;                 // running estimate of the actual samples-per-bit period; seeded from nominal, then tracked via EMA on observed long intervals
     this.locked = false;            // true after the first successful frame decode; tightens the absurdity bounds used to reject true glitches
+    // Chunk wall-clock window for the most recent feed() call. Used by
+    // _tryDecode to interpolate a frame's wall-clock time independent of ADC
+    // sample-clock drift. See feed() for the rationale.
+    this._chunkWallStart = 0;
+    this._chunkWallEnd = 0;
+    this._chunkStartSampleIdx = 0;
+    this._chunkLen = 0;
+    this._wallClockMode = "synthetic"; // "stamped" if worklet supplied timestamps
   }
 
-  feed(samples, sampleRate, nominalFps) {
+  feed(samples, sampleRate, nominalFps, chunkWallStart, chunkWallEnd) {
     // samplesPerBit only depends on (sampleRate, nominalFps); nominalFps is
     // fixed per decoder instance and sampleRate only changes on device switch.
     if (sampleRate !== this._cachedSampleRate) {
@@ -52,6 +60,29 @@ export class LtcDecoder {
     }
     this.nominalFps = nominalFps;
     if (this.sbEst === 0) this.sbEst = this.samplesPerBit;
+    // Chunk wall-clock bookkeeping. If the caller (worklet on the audio thread,
+    // or a test) supplied [chunkWallStart, chunkWallEnd], decoded frames inside
+    // this chunk get their wall-clock time by linear interpolation across the
+    // chunk: the chunk's wall-clock SPAN is host-quartz-measured, the
+    // sample-index within the chunk only locates the frame within that span.
+    // This recovers true wall-clock arrival time independent of ADC sample-
+    // clock drift — the bias that the legacy sample-count-based classifier
+    // suffered from. When timestamps are omitted (file analysis fallback), we
+    // fall back to stamping at feed-call time and assume ADC == wall-clock; in
+    // that mode the wall-clock classifier degrades to the same accuracy as
+    // the sample-count path. Consumers can detect this via wallClockMode.
+    const callT = performance.now();
+    this._chunkStartSampleIdx = this.sampleIndex;
+    this._chunkLen = samples.length;
+    if (chunkWallStart != null && chunkWallEnd != null) {
+      this._chunkWallStart = chunkWallStart;
+      this._chunkWallEnd = chunkWallEnd;
+      this._wallClockMode = "stamped";
+    } else {
+      this._chunkWallStart = callT;
+      this._chunkWallEnd = callT + (samples.length / sampleRate) * 1000;
+      this._wallClockMode = "synthetic";
+    }
     // If we haven't decoded a frame in over a minute the accumulated state is
     // stale: bit-error counts were racked up against noise while no LTC was
     // present, and the running frame count outlives the session it described.
@@ -169,7 +200,17 @@ export class LtcDecoder {
       return;
     }
     if (parsed) {
-      const now = performance.now();
+      // Frame wall-clock = chunk_t0 + (frame_end_sample_in_chunk / chunk_len) ×
+      // (chunk_t1 - chunk_t0). idx[n-1] is the absolute (stream-wide) sample
+      // index where the last bit transition was emitted; subtracting the chunk-
+      // start sample index gives the position within the current chunk. If the
+      // frame straddled the previous chunk boundary (last bit closed on this
+      // chunk but the rest came earlier), the position can be slightly negative
+      // — clamp to [0, chunkLen-1] so we stay in the interpolation window.
+      const offsetInChunk = Math.max(0, Math.min(this._chunkLen - 1,
+        idx[n - 1] - this._chunkStartSampleIdx));
+      const frac = this._chunkLen > 0 ? offsetInChunk / this._chunkLen : 0;
+      const now = this._chunkWallStart + frac * (this._chunkWallEnd - this._chunkWallStart);
       const frame = { ...parsed, t: now };
       this.lastFrame = frame;
       this.pendingFrames.push(frame);
@@ -185,9 +226,14 @@ export class LtcDecoder {
       // the drift readout. 120 frames ≈ 4 s at 30 fps.
       if (this.recentFrameSpans.length > 120) this.recentFrameSpans.shift();
       this.recentDecodeTimes.push(now);
-      // Cap at 1500 entries (~25 s at 60 fps); time-based pruning is done by
-      // the consumer when computing the dropout rate or the winner score.
-      if (this.recentDecodeTimes.length > 1500) this.recentDecodeTimes.shift();
+      // Time-based pruning: keep the last 45 s of decode timestamps. This is
+      // longer than the stable measurement window (20 s) + signal-loss hold
+      // (5 s) + headroom, and is independent of frame rate (entry-count caps
+      // had different window semantics at 24 vs 60 fps).
+      const cutoff = now - 45000;
+      while (this.recentDecodeTimes.length > 0 && this.recentDecodeTimes[0] < cutoff) {
+        this.recentDecodeTimes.shift();
+      }
       // Keep just the sync word so we don't re-decode the same frame; the
       // next frame's bits will accumulate after it.
       this.bitBuf = buf.slice(n - 16);
@@ -252,20 +298,68 @@ export class MultiRateDecoder {
     // Carrier observation cached across getter calls; invalidated whenever
     // new samples arrive (a new feed() can shift winner / medianSpan).
     this._carrierObs = null;
-    // Hysteresis state for the fractional/integer carrier classification. The
-    // raw threshold sits at 1.0005× expected span — exactly halfway between
-    // integer (1.000) and 1.001-divided rates. With only 120 frames of
-    // integer-sample spans (~4 s) the mean wobbles enough to flip across the
-    // midpoint on a clean 29.97 source. We remember the last decision and
-    // require the ratio to cross a wider band before flipping.
-    this._lastFractional = null;     // null | true | false
-    this._lastFractionalFps = null;  // nominalFps the decision belongs to
+    // Measurement-grade fractional/integer classification state.
+    // _committedFractional is the last classification we are confident enough
+    // to report on the UI; _committedNominalFps is the integer fps it applies
+    // to. Both are null while MEASURING or after signal loss > 5 s.
+    this._committedFractional = null;       // null | true | false
+    this._committedNominalFps = null;       // 24 | 30 | 60 | null
+    // Agreement-counter state for the 5σ + 3 consecutive agreements commit
+    // rule. We require three successive measurement updates, each ≥1 s apart,
+    // to agree on the same side before we commit. _pendingFractional is the
+    // current candidate side under accumulation; _agreementCount counts how
+    // many times we've observed it consecutively; _lastAgreementT throttles
+    // the counter so it can't be advanced by sub-second update bursts.
+    this._pendingFractional = null;
+    this._pendingNominalFps = null;
+    this._agreementCount = 0;
+    this._lastAgreementT = 0;
+    // Signal-loss hold. _lastFreshT is the wall-clock time of the most recent
+    // decoded frame (winner). When code stops, we keep showing the committed
+    // classification for 5 s, then drop to MEASURING.
+    this._lastFreshT = 0;
+    this._holdStartT = 0;                   // 0 when not in hold; set on first stale tick
+    // performance.now() resolution probe (clamped lower bound on measurement
+    // uncertainty). Some deployment contexts (cross-origin isolation off on
+    // some browsers) quantize performance.now() to 1 ms; we must widen our
+    // commit threshold accordingly. Probed lazily on the first feed() call.
+    this._clockResolutionMs = null;
+    // Event log for App.jsx to consume (MEASURING_COMMIT, DIVERGENCE,
+    // RATE_CHANGE). Same pattern as cadenceDetector.lastBreak: App.jsx
+    // watches .t for change and writes a session-log entry.
+    this._lastEvent = null;
   }
 
-  feed(samples, sampleRate) {
+  // Probe performance.now() resolution by sampling deltas. Repeated calls in
+  // a tight loop yield either 0 (same tick) or one resolution unit (next
+  // tick). The minimum nonzero delta over N samples is a good estimate of the
+  // quantization granularity.
+  _probeClockResolution() {
+    let minDelta = Infinity;
+    let prev = performance.now();
+    for (let i = 0; i < 1000; i++) {
+      const t = performance.now();
+      const d = t - prev;
+      if (d > 0 && d < minDelta) minDelta = d;
+      prev = t;
+    }
+    // If performance.now() never advanced over 1000 reads we're either on a
+    // fixed-tick clock (rare on real hardware) or under a test mock that
+    // returns a constant. Either way the loop-based probe isn't informative
+    // — assume effectively-continuous precision so the σ floor doesn't choke
+    // off legitimate commits. Real browsers always advance within 1000 reads.
+    return Number.isFinite(minDelta) ? minDelta : 0.001;
+  }
+
+  feed(samples, sampleRate, chunkWallStart, chunkWallEnd) {
     this._carrierObs = null;
-    for (const { fps, dec } of this.decoders) dec.feed(samples, sampleRate, fps);
+    for (const { fps, dec } of this.decoders) dec.feed(samples, sampleRate, fps, chunkWallStart, chunkWallEnd);
     this._pickWinner();
+    // Drive the carrier measurement state machine once per feed. The state
+    // machine advances the 5σ + 3-agreements commit, divergence detection,
+    // and signal-loss hold — none of which should be gated on whether
+    // anything happens to call carrierObservation() during this tick.
+    this.carrierObservation();
     // Drain the winning decoder's pending frames into the cadence detector.
     // A single audio chunk can contain more than one LTC frame; checking only
     // `lastFrame` per chunk would miss intermediate frames.
@@ -374,30 +468,91 @@ export class MultiRateDecoder {
   }
 
   // Whether the carrier is at a 1.001-divided NTSC rate vs the integer rate.
-  // Decided ONLY by measured frame span — never by the LTC DF flag bit or by
-  // the counting cadence. This is the load-bearing primitive that separates
-  // carrier-rate detection from counting-cadence detection. Uses the mean of
-  // recentFrameSpans for sub-sample precision (see carrierObservation).
+  // Tri-state: true | false | null. Null while MEASURING, when the host-quartz
+  // estimate has not yet committed at 5σ + 3 agreements. This is the load-
+  // bearing primitive that separates carrier-rate detection from counting-
+  // cadence detection — and a measurement-grade analyzer reports "still
+  // measuring" rather than guessing.
   _carrierIsFractional() {
     return this.carrierObservation().fractional;
   }
 
-  // Carrier-rate key, purely from frame-span timing. No DF, no flag bits, no
-  // count-pattern inference. Returns one of:
+  // Carrier-rate key, from wall-clock-based fps measurement. Returns one of:
   //   "23.976" | "24" | "25" | "29.97" | "30" | "50" | "59.94" | "60"
-  // or null if not yet locked / not enough span samples.
+  // or null until the host-quartz-based classifier has committed.
   carrierRate() {
     return this.carrierObservation().carrierRate;
   }
 
+  // Least-squares slope of frame-index vs wall-clock time across the supplied
+  // window. Returns { fps, sigmaFps, n, spanSec, ratio, sigmaRatio } or null.
+  // - fps is the measured frame rate from the slope (frames/ms × 1000)
+  // - sigmaFps is the standard error of the slope, floored by the
+  //   performance.now() quantization noise contribution
+  // - ratio is fps / nominalIntegerFps, used directly for fractional/integer
+  //   classification. The decision midpoint is (1 + 1/1.001) / 2.
+  // Centered-time form for numerical stability — performance.now() can be
+  // 10^9+ ms at runtime, and uncentered Σt² loses precision in float64.
+  _lsqFps(times, fromT, toT, nominalFps) {
+    if (!times || times.length === 0) return null;
+    // Inclusive both ends; binary-searchable but linear is fine for ≤2k entries.
+    let i0 = 0;
+    while (i0 < times.length && times[i0] < fromT) i0++;
+    const n = times.length - i0;
+    if (n < 10) return null;
+    const spanMs = times[times.length - 1] - times[i0];
+    if (spanMs < 500) return null;
+    let tSum = 0;
+    for (let i = i0; i < times.length; i++) tSum += times[i];
+    const tMean = tSum / n;
+    const yMean = (n - 1) / 2;
+    let Sxx = 0, Sxy = 0;
+    for (let i = i0; i < times.length; i++) {
+      const dt = times[i] - tMean;
+      const dy = (i - i0) - yMean;
+      Sxx += dt * dt;
+      Sxy += dt * dy;
+    }
+    if (Sxx <= 0) return null;
+    const slope = Sxy / Sxx;     // frames per ms
+    // Residual sum of squares for stderr.
+    let SSres = 0;
+    for (let i = i0; i < times.length; i++) {
+      const yHat = slope * (times[i] - tMean) + yMean;
+      const r = (i - i0) - yHat;
+      SSres += r * r;
+    }
+    const dof = n - 2;
+    if (dof <= 0) return null;
+    let sigmaSlope = Math.sqrt(SSres / dof) / Math.sqrt(Sxx);
+    // Floor sigma by the contribution from performance.now() quantization.
+    // Endpoint timestamp uncertainty propagates roughly as
+    // σ_q / (span × √(n/12)); ignoring the constant, σ_q/span is a
+    // conservative floor that prevents over-confidence when the residuals
+    // happen to be tiny by chance.
+    const clockRes = this._clockResolutionMs ?? 0.1;
+    const qFloor = (clockRes / spanMs) * (1 / 1000);  // slope-domain floor
+    if (sigmaSlope < qFloor) sigmaSlope = qFloor;
+    const fps = slope * 1000;
+    const sigmaFps = sigmaSlope * 1000;
+    const ratio = fps / nominalFps;
+    const sigmaRatio = sigmaFps / nominalFps;
+    return { fps, sigmaFps, n, spanSec: spanMs / 1000, ratio, sigmaRatio };
+  }
+
   // One-shot observation of the carrier, computed lazily and cached until the
-  // next feed() invalidates it. Bundles the fields that the four public
-  // getters (carrierRate / cadence / carrierCadenceMismatch / detectedRateKey)
-  // would otherwise each compute independently per tick.
+  // next feed() invalidates it. Bundles every field the UI / publisher / log
+  // would want. See class header for the measurement architecture.
   carrierObservation() {
     if (this._carrierObs) return this._carrierObs;
     const fps = this.nominalFps;
     const winner = this.winner;
+    const now = performance.now();
+    if (this._clockResolutionMs == null) {
+      this._clockResolutionMs = this._probeClockResolution();
+    }
+    // medianSpan / meanSpan are retained for ADC-clock-based drift reporting
+    // and legacy callers, but no longer drive the fractional classification.
     let medianSpan = null;
     let meanSpan = null;
     if (winner) {
@@ -410,45 +565,161 @@ export class MultiRateDecoder {
         meanSpan = sum / spans.length;
       }
     }
-    // Fractional classification uses the MEAN, not the median. The threshold
-    // sits exactly halfway between integer and 1.001-divided rates, and the
-    // per-frame span is integer-sample-resolution — the median snaps to a
-    // sample boundary and can flip across the threshold under normal jitter,
-    // even for a clean 29.97 carrier. The mean recovers sub-sample precision
-    // by averaging across the natural integer jitter (same reasoning as
-    // driftPpm). Median is still used for general reporting / debugging.
-    let fractional = null;
-    if (fps === 25 || fps === 50) {
-      fractional = false;
-    } else if ((fps === 24 || fps === 30 || fps === 60) && winner && meanSpan != null) {
-      const expected = 79 * winner.dec.samplesPerBit;
-      const ratio = meanSpan / expected;
-      // Asymmetric thresholds around 1.0005 give a deadband: once classified,
-      // the ratio has to swing past the *opposite* threshold to flip. The band
-      // ±0.0002 around 1.0005 corresponds to ±0.32 samples at 48 kHz / 30 fps
-      // — wider than the wobble we see on the 120-frame mean, but well inside
-      // the 1.6-sample gap between integer 30 and 29.97 actuals.
-      const ENTER_FRACTIONAL = 1.0007;
-      const EXIT_FRACTIONAL = 1.0003;
-      const prev = (this._lastFractionalFps === fps) ? this._lastFractional : null;
-      if (prev === true) fractional = (ratio >= EXIT_FRACTIONAL);
-      else if (prev === false) fractional = (ratio >= ENTER_FRACTIONAL);
-      else fractional = (ratio >= 1.0005);  // first decision: use the midpoint
-      this._lastFractional = fractional;
-      this._lastFractionalFps = fps;
-    } else {
-      // No winner or insufficient spans — leave hysteresis state alone so a
-      // brief signal dropout doesn't reset the classification.
+    // Stable (20 s) and detector (3 s) wall-clock LSQ windows on the winning
+    // decoder's frame timestamps. The two windows serve different roles:
+    // stable drives the committed classification; detector watches for source
+    // changes and triggers invalidation before stable would catch up.
+    let stable = null;
+    let detector = null;
+    if (winner && fps && (fps === 24 || fps === 30 || fps === 60 ||
+                           fps === 25 || fps === 50)) {
+      const times = winner.dec.recentDecodeTimes;
+      stable   = this._lsqFps(times, now - 20000, now, fps);
+      detector = this._lsqFps(times, now -  3000, now, fps);
+      if (winner.dec.lastFrame) this._lastFreshT = winner.dec.lastFrame.t;
     }
+    // Side computation: which half of the integer/fractional decision space
+    // does the stable estimate sit in, with 5σ confidence?
+    //   integer rate:    ratio ≈ 1.000
+    //   1.001-divided:   ratio ≈ 1/1.001 ≈ 0.999001
+    //   midpoint:        (1 + 1/1.001) / 2 ≈ 0.9995002
+    const MIDPOINT = (1 + 1 / 1.001) / 2;
+    const SIGMA_GATE = 5;
+    const AGREEMENTS_REQUIRED = 3;
+    const AGREEMENT_MIN_INTERVAL_MS = 1000;
+    let candidateSide = null;   // true (fractional) | false (integer) | null
+    const fpsSupportsFractional = (fps === 24 || fps === 30 || fps === 60);
+    if (fps === 25 || fps === 50) {
+      // 25 / 50 have no NTSC counterpart; fractional is definitionally false.
+      candidateSide = false;
+    } else if (fpsSupportsFractional && stable) {
+      const distFromMid = stable.ratio - MIDPOINT;
+      if (Math.abs(distFromMid) >= SIGMA_GATE * stable.sigmaRatio) {
+        candidateSide = distFromMid < 0;  // below midpoint → fractional
+      }
+    }
+    // Agreement counter. Sub-1 s update bursts do not advance the counter;
+    // genuine consecutive agreements over time do. A change of side or a
+    // change of winner fps resets the counter to 1 against the new candidate.
+    if (candidateSide == null || fps !== this._pendingNominalFps) {
+      if (candidateSide == null) {
+        this._pendingFractional = null;
+        this._pendingNominalFps = null;
+        this._agreementCount = 0;
+      } else {
+        // New fps came into play (e.g. winner switched).
+        this._pendingFractional = candidateSide;
+        this._pendingNominalFps = fps;
+        this._agreementCount = 1;
+        this._lastAgreementT = now;
+      }
+    } else if (candidateSide !== this._pendingFractional) {
+      this._pendingFractional = candidateSide;
+      this._agreementCount = 1;
+      this._lastAgreementT = now;
+    } else if (now - this._lastAgreementT >= AGREEMENT_MIN_INTERVAL_MS) {
+      this._agreementCount++;
+      this._lastAgreementT = now;
+    }
+    // Commit when we've reached the agreement target.
+    const readyToCommit = (this._pendingFractional != null &&
+                          this._agreementCount >= AGREEMENTS_REQUIRED);
+    if (readyToCommit) {
+      const prevFractional = this._committedFractional;
+      const prevFps = this._committedNominalFps;
+      const changed = (prevFractional !== this._pendingFractional ||
+                       prevFps !== this._pendingNominalFps);
+      if (changed) {
+        const eventType = (prevFractional == null) ? "MEASURING_COMMIT" : "RATE_CHANGE";
+        this._lastEvent = {
+          type: eventType, t: now,
+          fps: this._pendingNominalFps,
+          fractional: this._pendingFractional,
+          measuredFps: stable?.fps,
+          sigmaFps: stable?.sigmaFps,
+          windowFrames: stable?.n,
+          windowSeconds: stable?.spanSec,
+          previousFractional: prevFractional,
+          previousNominalFps: prevFps,
+        };
+      }
+      this._committedFractional = this._pendingFractional;
+      this._committedNominalFps = this._pendingNominalFps;
+      this._holdStartT = 0;
+    }
+    // Divergence: if we have a commit AND the 3 s detector window says, with
+    // ≥5σ confidence, that we're on the other side of the midpoint — drop the
+    // commit and re-measure. This is what makes the analyzer responsive to a
+    // real source change without waiting 20 s for the stable window to roll
+    // through. Disabled while signal is stale (handled by hold logic below).
+    if (this._committedFractional != null && detector && fps === this._committedNominalFps) {
+      const distFromMid = detector.ratio - MIDPOINT;
+      const detectorSide = (Math.abs(distFromMid) >= SIGMA_GATE * detector.sigmaRatio)
+        ? (distFromMid < 0) : null;
+      if (detectorSide != null && detectorSide !== this._committedFractional) {
+        this._lastEvent = {
+          type: "DIVERGENCE", t: now,
+          fps: this._committedNominalFps,
+          committedFractional: this._committedFractional,
+          detectorFractional: detectorSide,
+          detectorFps: detector.fps,
+          detectorSigmaFps: detector.sigmaFps,
+        };
+        this._committedFractional = null;
+        this._committedNominalFps = null;
+        this._pendingFractional = detectorSide;
+        this._pendingNominalFps = fps;
+        this._agreementCount = 1;
+        this._lastAgreementT = now;
+      }
+    }
+    // Signal-loss hold. If the most recent frame is older than 500 ms, we're
+    // in a stale state. Hold the committed classification for up to 5 s after
+    // the last fresh frame; then clear.
+    const stale = !winner || (now - this._lastFreshT > 500);
+    if (stale && this._committedFractional != null) {
+      if (this._holdStartT === 0) this._holdStartT = this._lastFreshT;
+      if (now - this._holdStartT > 5000) {
+        this._committedFractional = null;
+        this._committedNominalFps = null;
+        this._pendingFractional = null;
+        this._pendingNominalFps = null;
+        this._agreementCount = 0;
+        this._holdStartT = 0;
+      }
+    } else if (!stale) {
+      this._holdStartT = 0;
+    }
+    // Report. fractional reflects committed state; classConfidence is "high"
+    // once committed, null otherwise. (Two-level so far; the field exists so
+    // App.jsx / publisher don't need to evolve when we add intermediate
+    // confidence levels.)
+    const fractional = this._committedFractional;
+    const classConfidence = fractional != null ? "high" : null;
     let carrierRate = null;
     if (fps === 25) carrierRate = "25";
     else if (fps === 50) carrierRate = "50";
-    else if (fractional != null) {
+    else if (fractional != null && fps === this._committedNominalFps) {
       if (fps === 24) carrierRate = fractional ? "23.976" : "24";
       else if (fps === 30) carrierRate = fractional ? "29.97" : "30";
       else if (fps === 60) carrierRate = fractional ? "59.94" : "60";
     }
-    this._carrierObs = { nominalFps: fps, fractional, medianSpan, carrierRate };
+    this._carrierObs = {
+      nominalFps: fps,
+      fractional,
+      carrierRate,
+      classConfidence,
+      medianSpan,
+      meanSpan,
+      stable,
+      detector,
+      pendingFractional: this._pendingFractional,
+      agreementCount: this._agreementCount,
+      agreementsRequired: AGREEMENTS_REQUIRED,
+      heldDuringSignalLoss: stale && fractional != null,
+      clockResolutionMs: this._clockResolutionMs,
+      measurementMethod: "walltime-lsq",
+    };
     return this._carrierObs;
   }
 
@@ -485,24 +756,29 @@ export class MultiRateDecoder {
     return carrier;
   }
 
-  // True if the carrier rate and counting cadence disagree in a way that
-  // wouldn't occur in spec-conformant material. e.g. carrier=30 with DF
-  // count, or carrier=29.97 (fractional) with 24-cadence count. Returns
-  // null until both detections are confident.
+  // Carrier-vs-cadence anomaly. Returns
+  //   { result: true | false, confidence: "high" | null, reason: string | null }
+  // or null if either detection isn't ready. confidence is "high" only when
+  // both the carrier classifier has committed (5σ + 3 agreements) AND the
+  // cadence detector reports its own readiness. Lower-confidence mismatches
+  // (one side still MEASURING) are reported as result=false rather than
+  // raised — we don't alarm operators on unsettled measurements.
   carrierCadenceMismatch() {
-    const carrier = this.carrierRate();
+    const obs = this.carrierObservation();
     const cad = this.cadence();
-    if (carrier == null || cad == null) return null;
-    // Compare cadence fps to carrier's nominal integer fps.
+    if (obs.fractional == null || obs.nominalFps == null || cad == null) return null;
+    const carrier = obs.carrierRate;
+    if (carrier == null) return null;
     const carrierNominalFps = rateKeyToNominalFps(carrier);
-    if (cad.fps !== carrierNominalFps) return true;
-    // DF only meaningful at 30 and 60 cadence; for DF to be in-spec the
-    // carrier must be the fractional 1.001-divided variant.
-    if (cad.dropFrame) {
-      const fractional = this._carrierIsFractional();
-      if (fractional === false) return true;  // integer 30/60 carrier + DF count
+    if (cad.fps !== carrierNominalFps) {
+      return { result: true, confidence: "high",
+        reason: `carrier ${carrierNominalFps} fps but cadence counts at ${cad.fps} fps` };
     }
-    return false;
+    if (cad.dropFrame && obs.fractional === false) {
+      return { result: true, confidence: "high",
+        reason: `integer ${carrierNominalFps} fps carrier carrying DF count (non-conformant)` };
+    }
+    return { result: false, confidence: "high", reason: null };
   }
 
   // Dropout rate over a rolling window: percentage of expected frames that
@@ -553,42 +829,66 @@ export class MultiRateDecoder {
     return Math.max(0, Math.min(100, 100 * (1 - count / expected)));
   }
 
-  // Clock drift in parts-per-million between the measured frame period and
-  // the exact expected period for the detected SMPTE rate (integer or
-  // 1.001-divided NTSC). Useful as a "chase" / sync indicator:
-  //   • ~0 ppm  → source is solid-lock to the detected nominal rate
-  //   • ±tens   → analog tape transport drift / minor varispeed
-  //   • hundreds+ → source not matching either standard rate; likely
-  //                 freewheeling or a non-standard generator
+  // Source-LTC-clock drift relative to the HOST QUARTZ, in parts-per-million.
+  // This is the wall-clock-domain drift derived from the LSQ measurement —
+  // independent of the capture device's sample clock. For an LTC source that
+  // is itself disciplined to house sync, ±0 ppm here means the source is
+  // synced to the host's quartz; ±tens of ppm typically indicates host-quartz
+  // drift rather than source drift (commodity quartz is ±10–50 ppm). For an
+  // absolute drift number you would discipline the host clock against an
+  // external reference.
+  driftPpmSourceVsHostQuartz() {
+    const obs = this.carrierObservation();
+    if (!obs.stable || obs.fractional == null || obs.nominalFps == null) return null;
+    const expected = obs.nominalFps / (obs.fractional ? 1.001 : 1.0);
+    return (obs.stable.fps - expected) / expected * 1e6;
+  }
+
+  // Source-LTC-clock drift relative to the ADC sample clock, in parts-per-
+  // million. Convention: positive means source is FASTER than the ADC clock
+  // (matches the convention used by driftPpmSourceVsHostQuartz). Computed
+  // from sample-count-based frame-span timing; diagnostic of the capture
+  // chain (a high value here together with a low host-quartz value means
+  // the ADC clock is off, not the LTC source).
   //
-  // The measured period uses the MEAN of recentFrameSpans, not the median.
-  // Per-frame span is measured at integer sample resolution, but real LTC
-  // frame periods are usually non-integer in samples (e.g. 29.97 fps at 48k
-  // is 1581.58 samples per 79-bit span). The median snaps to the nearest
-  // integer sample, producing several-hundred-ppm bias; the mean recovers
-  // sub-sample precision by averaging across the natural integer jitter.
-  //
-  // Note: switching to the bit-clock recovery estimate (`sbEst`) was tried
-  // and reverted — it's updated per long interval (one bit period) and so
-  // integer-sample quantization on individual long intervals dominates,
-  // giving ~3× more peak-to-peak noise than the frame-span mean. Each
-  // frame-span measurement averages 79 bit periods, so √79 ≈ 9× of integer
-  // noise washes out before the cross-frame averaging even starts.
-  driftPpm() {
+  // Note on sign: if the ADC clock runs fast, each source-frame's span in
+  // ADC samples is LARGER than nominal (more ADC ticks elapse during the
+  // same wall-clock interval). meanSpan > expected → source-slower-than-
+  // ADC → negative drift. Hence (expected − meanSpan) / expected, not
+  // (meanSpan − expected).
+  driftPpmSourceVsAdc() {
     const winner = this.winner;
     if (!winner) return null;
     const dec = winner.dec;
     const spans = dec.recentFrameSpans;
     if (!spans || spans.length < 10) return null;
-    // Fractional-ness is a CARRIER property — derived from frame-span timing,
-    // not the DF flag bit. Same primitive as carrierRate() / dropoutPct().
-    const isFractional = this._carrierIsFractional() === true;
+    const obs = this.carrierObservation();
+    if (obs.fractional == null) return null;
     let sum = 0;
     for (let i = 0; i < spans.length; i++) sum += spans[i];
     const meanSpan = sum / spans.length;
-    const expected = 79 * dec.samplesPerBit * (isFractional ? 1.001 : 1.0);
-    return (meanSpan - expected) / expected * 1e6;
+    const expected = 79 * dec.samplesPerBit * (obs.fractional ? 1.001 : 1.0);
+    return (expected - meanSpan) / expected * 1e6;
   }
+
+  // Capture-clock error: difference between source-vs-host and source-vs-ADC
+  // drift. With the source as common reference, this is how far the ADC clock
+  // is from the host quartz. A capture device feeding a sample-rate-converter
+  // can land at hundreds of ppm here.
+  captureClockErrorPpm() {
+    const host = this.driftPpmSourceVsHostQuartz();
+    const adc = this.driftPpmSourceVsAdc();
+    if (host == null || adc == null) return null;
+    return host - adc;
+  }
+
+  // Deprecated alias. New code should choose explicitly between the two
+  // drift numbers depending on what the engineer wants to know.
+  driftPpm() { return this.driftPpmSourceVsHostQuartz(); }
+
+  // Event log accessor for App.jsx (mirrors cadenceDetector.lastBreak pattern).
+  // Fires on MEASURING_COMMIT, RATE_CHANGE, and DIVERGENCE transitions.
+  get lastCarrierEvent() { return this._lastEvent; }
 }
 
 export function rateKeyToNominalFps(rateKey) {
