@@ -6,6 +6,17 @@
 //   - a "1" adds a mid-bit transition (so two short intervals per "1")
 //   - a "0" has no mid-bit transition (one long interval per "0")
 // We pair consecutive short intervals into a single "1" bit.
+//
+// Hardware-style bit-clock recovery: rather than testing each transition
+// interval against a fixed ±tolerance window around the nominal bit period,
+// we maintain a running estimate of the actual bit period (`sbEst`) and
+// classify each interval as "short" or "long" by whichever expected value is
+// closest. This mirrors what hardware LTC chips do once locked — they track
+// the recovered bit clock and decide bit slots by phase, not by independent
+// interval measurement. A fixed-window decoder rejects intervals that land
+// mid-way (e.g. ~1.2× the half-bit period from edge-timing jitter), counts
+// them as errors, and breaks the pendingShort pairing — wrecking the frame.
+// Hardware doesn't see those as errors at all; it just bins them.
 
 const SYNC = [0,0,1,1,1,1,1,1,1,1,1,1,1,1,0,1];
 
@@ -26,57 +37,72 @@ export class LtcDecoder {
     this.recentFrameSpans = [];     // rolling window of actual sample spans for the last decoded frames
     this.recentDecodeTimes = [];    // wall-clock timestamps of recent successful decodes (for dropout rate)
     this.pendingFrames = [];        // frames decoded since the consumer last drained — needed for continuity tracking when a single audio chunk produces more than one frame
+    this.sbEst = 0;                 // running estimate of the actual samples-per-bit period; seeded from nominal, then tracked via EMA on observed long intervals
+    this.locked = false;            // true after the first successful frame decode; tightens the absurdity bounds used to reject true glitches
   }
 
   feed(samples, sampleRate, nominalFps) {
     this.samplesPerBit = sampleRate / (nominalFps * 80);
+    if (this.sbEst === 0) this.sbEst = this.samplesPerBit;
     // If we haven't decoded a frame in over a minute, the accumulated
     // bit-error count is stale — it was racked up against noise transitions
     // while no LTC was present. Clear it so a returning signal isn't
-    // unfairly penalised in the FRAME INTEGRITY readout.
+    // unfairly penalised in the FRAME INTEGRITY readout. Also drop the
+    // lock flag so the absurdity bounds widen back out for re-acquisition.
     if (this.bitErrors > 0 && this.lastFrame && performance.now() - this.lastFrame.t > 60000) {
       this.bitErrors = 0;
+      this.locked = false;
+      this.sbEst = this.samplesPerBit;
     }
-    const samplesPerBit = this.samplesPerBit;
-    const halfBit = samplesPerBit / 2;
-    // ±15% per-interval tolerance prevents 24/25 fps decoders from accepting
-    // 30 fps intervals (which differ by ~25%), but is still loose enough for
-    // the typical 1-2% clock drift of real LTC sources. 24 vs 25 fps cross-
-    // locks (only 4% apart) are caught downstream by the frame-span check.
-    const shortMin = halfBit * 0.85;
-    const shortMax = halfBit * 1.15;
-    const longMin  = samplesPerBit * 0.85;
-    const longMax  = samplesPerBit * 1.15;
 
     for (let i = 0; i < samples.length; i++) {
       const s = samples[i];
       // Treat exact zero as previous sign to avoid spurious crossings.
       const sign = s > 0 ? 1 : (s < 0 ? -1 : this.lastSign);
       if (this.lastSign !== 0 && sign !== this.lastSign) {
-        const interval = this.sampleIndex - this.lastTransitionSample;
-        if (interval >= shortMin && interval <= shortMax) {
-          if (this.pendingShort) {
-            this._pushBit(1);
-            this.pendingShort = false;
-          } else {
-            this.pendingShort = true;
-          }
-        } else if (interval >= longMin && interval <= longMax) {
-          if (this.pendingShort) {
-            // Unpaired short followed by a long — drop the orphan, count as error.
-            this.bitErrors++;
-            this.pendingShort = false;
-          }
-          this._pushBit(0);
-        } else {
-          // Out of range — glitch or wrong rate.
-          this.bitErrors++;
-          this.pendingShort = false;
-        }
+        this._handleInterval(this.sampleIndex - this.lastTransitionSample);
         this.lastTransitionSample = this.sampleIndex;
       }
       if (sign !== 0) this.lastSign = sign;
       this.sampleIndex++;
+    }
+  }
+
+  _handleInterval(interval) {
+    const sb = this.sbEst;
+    const half = sb / 2;
+    // Absurdity bounds: pre-lock loose so acquisition isn't picky; post-lock
+    // tighter so true glitches still get rejected. Wrong-rate cross-locks are
+    // prevented downstream by the 80-bit frame-span check (±3%), which is
+    // much stricter than any per-interval window could be.
+    const absMin = this.locked ? half * 0.5 : half * 0.3;
+    const absMax = this.locked ? sb   * 1.5 : sb   * 1.7;
+    if (interval < absMin || interval > absMax) {
+      this.bitErrors++;
+      this.pendingShort = false;
+      return;
+    }
+    // Snap to nearest expected value. Decision boundary is the midpoint
+    // between half-bit and full-bit (0.75 × sb).
+    const isShort = interval < (half + sb) / 2;
+    if (isShort) {
+      if (this.pendingShort) {
+        this._pushBit(1);
+        this.pendingShort = false;
+      } else {
+        this.pendingShort = true;
+      }
+    } else {
+      if (this.pendingShort) {
+        // Unpaired short followed by a long — drop the orphan, count as error.
+        this.bitErrors++;
+        this.pendingShort = false;
+      }
+      this._pushBit(0);
+      // Long intervals directly measure one bit period — update the bit-clock
+      // estimate via slow EMA. Genuine drift tracks; transient outliers (which
+      // we accepted due to wider snap-to-nearest binning) don't pull it much.
+      this.sbEst = this.sbEst * 0.99 + interval * 0.01;
     }
   }
 
@@ -122,6 +148,7 @@ export class LtcDecoder {
       this.pendingFrames.push(frame);
       this.lastFrameBits = Uint8Array.from(f);
       this.framesDecoded++;
+      this.locked = true;
       this.recentFrameSpans.push(frameSamples);
       // Larger window than strictly needed for median (used for rate
       // classification, ≥10 entries is enough) so that the mean over the
