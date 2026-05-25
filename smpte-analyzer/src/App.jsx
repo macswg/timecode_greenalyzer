@@ -841,6 +841,11 @@ export default function SMPTEAnalyzer() {
       data.ltcLocked = !!fresh;
       data.detectedRateKey = dec?.detectedRateKey() ?? null;
       data.detectedFps = dec?.nominalFps ?? null;
+      // Carrier rate (timing-only) and counting cadence (FF-sequence-only)
+      // are observed independently — see ltcDecoder.js / cadenceDetector.js.
+      data.carrierRate = dec?.carrierRate() ?? null;
+      data.cadence = dec?.cadence() ?? null;
+      data.carrierCadenceMismatch = dec?.carrierCadenceMismatch() ?? null;
       data.framesDecoded = dec?.framesDecoded ?? 0;
       data.bitErrors = dec?.bitErrors ?? 0;
       data.lastFrameBits = dec?.lastFrameBits ?? null;
@@ -954,6 +959,12 @@ export default function SMPTEAnalyzer() {
         type: "tc", t: Date.now(),
         hh: data.hh, mm: data.mm, ss: data.ss, ff: data.ff,
         rate: rateKey, dropFrame: data.dropFrame,
+        // Carrier rate and counting cadence are independent observations.
+        // `rate` (above) is the combined SMPTE key kept for compat.
+        carrierRate: data.carrierRate ?? null,
+        cadenceFps: data.cadence?.fps ?? null,
+        cadenceDropFrame: data.cadence?.dropFrame ?? null,
+        carrierCadenceMismatch: data.carrierCadenceMismatch ?? null,
         source: useRealAudio ? "live" : "sim",
         ltcLocked: useRealAudio ? !!data.ltcLocked : true,
         frameValid: data.frameValid !== false,
@@ -1491,16 +1502,28 @@ export default function SMPTEAnalyzer() {
             dim={bootstrapping}
           />
           {(() => {
-            const shownRateKey = bootstrapping
+            // In live mode: carrier rate (timing) and counting cadence (FF
+            // wrap behaviour) are observed independently. In sim mode the
+            // synthesized stream uses one consistent rate, so we just show
+            // the selected SMPTE rate.
+            const carrierKey = bootstrapping
               ? null
               : liveMode
-                ? (ltcLocked ? analysis?.detectedRateKey : null)
+                ? (ltcLocked ? analysis?.carrierRate : null)
                 : rateKey;
-            const isDf = shownRateKey ? !!SMPTE_RATES[shownRateKey]?.dropFrame : false;
-            // Blue for non-drop (avoids visual confusion with the green
-            // "frame valid" digit color); orange (matches DF badge) for DF.
+            const cad = liveMode ? analysis?.cadence : null;
+            const simIsDf = !liveMode && !!SMPTE_RATES[rateKey]?.dropFrame;
+            const cadenceLabel = !liveMode
+              ? (simIsDf ? "DF" : "ND")
+              : cad
+                ? (cad.dropFrameKnown
+                    ? (cad.dropFrame ? "DF" : "ND")
+                    : "ND?")
+                : null;
+            const isDf = liveMode ? (cad?.dropFrame === true) : simIsDf;
             const rateColor = isDf ? "#ffaa00" : "#3b9cff";
             const rateGlow = isDf ? "rgba(255,170,0,0.4)" : "rgba(59,156,255,0.4)";
+            const mismatch = liveMode && analysis?.carrierCadenceMismatch === true;
             return (
           <div className="tc-meta" style={{ display:"flex", flexDirection:"column", gap:8, alignItems:"flex-end" }}>
             <div style={{
@@ -1510,13 +1533,28 @@ export default function SMPTEAnalyzer() {
               letterSpacing:2,
               transition: "color 0.2s, text-shadow 0.2s",
             }}>
-              {shownRateKey ? SMPTE_RATES[shownRateKey].label : (liveMode ? "" : "— —")}
+              {carrierKey ? carrierKey : (liveMode ? "" : "— —")}
+              {cadenceLabel && (
+                <span style={{ fontSize:14, color: mismatch ? "#ff3b3b" : "#888", letterSpacing:2, marginLeft:8 }}>
+                  · {cadenceLabel}
+                </span>
+              )}
               {!bootstrapping && liveMode && (
                 <span style={{ fontSize:11, color:"#22d3ee", letterSpacing:3, marginLeft: ltcLocked ? 8 : 0 }}>
                   {ltcLocked ? "DETECTED" : "DETECTING…"}
                 </span>
               )}
             </div>
+            {mismatch && (
+              <div style={{ fontSize:10, color:"#ff3b3b", fontFamily:"monospace", letterSpacing:2 }}>
+                ⚠ CARRIER {analysis?.carrierRate} / CADENCE {cad?.fps}{cad?.dropFrame ? " DF" : " ND"} MISMATCH
+              </div>
+            )}
+            {liveMode && cad && cad.dfFlagMatches === false && (
+              <div style={{ fontSize:10, color:"#ffaa00", fontFamily:"monospace", letterSpacing:2 }}>
+                ⚠ DF FLAG BIT DISAGREES WITH COUNT BEHAVIOUR
+              </div>
+            )}
             <div style={{ display:"flex", gap:6, flexWrap:"wrap", justifyContent:"flex-end" }}>
               <StatusBadge label="LOCK" active={!bootstrapping && analysis?.frameValid === true} color="#00ff88" />
               <StatusBadge label="DF" active={tc.dropFrame && (!liveMode || !!analysis?.ltcLocked)} color="#ffaa00" />

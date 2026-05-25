@@ -1,3 +1,5 @@
+import { CadenceDetector } from "./cadenceDetector";
+
 // LTC biphase-mark decoder with rolling state across sample chunks.
 // Per SMPTE ST 12-1: 80 bits/frame, sync word 0011111111111101 at bits 64-79.
 //
@@ -214,73 +216,41 @@ export function tcString(lf) {
 
 // Run several LtcDecoders at candidate fps in parallel and pick the winner
 // by recent score (frames decoded - bit errors). This is how we auto-detect
-// incoming rate without asking the user.
+// the incoming *carrier rate* — i.e. the bit-clock timing — without asking
+// the user. The carrier rate is one of two independent properties of an
+// LTC stream; the other is the counting cadence (how the FF field wraps),
+// which is observed separately by CadenceDetector from the decoded numbers.
 const CANDIDATE_FPS = [24, 25, 30, 50, 60];
 
 export class MultiRateDecoder {
   constructor() {
     this.decoders = CANDIDATE_FPS.map(fps => ({ fps, dec: new LtcDecoder() }));
     this.winnerIdx = -1;
-    // Continuity tracking — flags when the incoming LTC's HH:MM:SS:FF
-    // doesn't advance by exactly one frame between consecutive successful
-    // decodes (catches edit splices, dropout-induced jumps, freewheel
-    // resets, and free-running generators that aren't actually counting).
-    this._prevFrameNumber = null;
-    this._prevFrameTc = null;
-    this._prevDecodeT = null;
-    this.continuityBreaks = 0;
-    this.lastBreak = null;  // { type, delta, from, to, t }
+    // Counting-cadence and continuity tracking. Driven by the decoded
+    // HH:MM:SS:FF sequence, NOT by the carrier-rate winner. See cadenceDetector.js.
+    this.cadenceDetector = new CadenceDetector();
   }
 
   feed(samples, sampleRate) {
     for (const { fps, dec } of this.decoders) dec.feed(samples, sampleRate, fps);
     this._pickWinner();
-    // Drain the winning decoder's pending frames so every decoded frame
-    // gets its own continuity check — a single audio chunk can contain
-    // more than one LTC frame, and checking only `lastFrame` per chunk
-    // would miss intermediate frames and produce spurious JUMP breaks.
+    // Drain the winning decoder's pending frames into the cadence detector.
+    // A single audio chunk can contain more than one LTC frame; checking only
+    // `lastFrame` per chunk would miss intermediate frames.
     const winner = this.winner;
-    const fps = this.nominalFps;
-    if (winner && fps != null) {
+    if (winner) {
       for (const frame of winner.dec.pendingFrames) {
-        this._checkFrameContinuity(frame, fps);
+        this.cadenceDetector.feed(frame);
       }
     }
     // Clear all candidates' queues — non-winners' decodes are discarded.
     for (const { dec } of this.decoders) dec.pendingFrames = [];
   }
 
-  _checkFrameContinuity(frame, fps) {
-    // If we've been unlocked for ≥500 ms, reset rather than report a
-    // spurious "jump" across the gap.
-    if (this._prevDecodeT != null && (frame.t - this._prevDecodeT) > 500) {
-      this._prevFrameNumber = null;
-      this._prevFrameTc = null;
-    }
-    // If the signal stopped for ≥3 s and is now resuming, the previous
-    // break history is no longer relevant — start the new run clean.
-    if (this._prevDecodeT != null && (frame.t - this._prevDecodeT) > 3000) {
-      this.continuityBreaks = 0;
-      this.lastBreak = null;
-    }
-    this._prevDecodeT = frame.t;
-    const current = tcToFrameNumber(frame.hh, frame.mm, frame.ss, frame.ff, fps, frame.dropFrame);
-    if (this._prevFrameNumber != null) {
-      const delta = current - this._prevFrameNumber;
-      if (delta !== 1) {
-        this.continuityBreaks++;
-        this.lastBreak = {
-          type: delta === 0 ? "REPEAT" : delta > 1 ? "JUMP" : "REWIND",
-          delta,
-          from: this._prevFrameTc,
-          to: tcString(frame),
-          t: frame.t,
-        };
-      }
-    }
-    this._prevFrameNumber = current;
-    this._prevFrameTc = tcString(frame);
-  }
+  // Continuity tracking lives in the cadence detector now — these getters
+  // preserve the previous surface for callers.
+  get continuityBreaks() { return this.cadenceDetector.continuityBreaks; }
+  get lastBreak() { return this.cadenceDetector.lastBreak; }
 
   _pickWinner() {
     // Score on a 20-second window of successful decodes, not cumulative
@@ -344,35 +314,90 @@ export class MultiRateDecoder {
     return sorted[Math.floor(sorted.length / 2)];
   }
 
-  // Map decoded fps + dropFrame flag + measured frame span to a SMPTE rate
-  // key. The dropFrame flag distinguishes the DF variants outright. For NDF
-  // signals we measure whether the actual frame span is closer to the
-  // integer rate or to the 1.001-divided fractional rate (NTSC family).
-  detectedRateKey() {
-    const lf = this.lastFrame;
-    if (!lf) return null;
+  // Whether the carrier is at a 1.001-divided NTSC rate vs the integer rate.
+  // Decided ONLY by measured frame span — never by the LTC DF flag bit or by
+  // the counting cadence. This is the load-bearing primitive that separates
+  // carrier-rate detection from counting-cadence detection.
+  _carrierIsFractional() {
     const fps = this.nominalFps;
-    if (lf.dropFrame) {
-      if (fps === 30) return "29.97df";
-      if (fps === 60) return "59.94df";
-    }
-    // NDF: decide integer vs fractional by frame-span ratio. The 30-fps
-    // decoder expects 80 × samplesPerBit samples per frame; an actual 29.97
-    // signal arrives 0.1% longer (×1.001). Threshold at the midpoint
-    // (×1.0005) so even a 1-sample drift over 30+ samples leans correctly.
-    if (fps === 24 || fps === 30 || fps === 60) {
-      const winner = this.winner;
-      // 79 bit durations between idx[n-80] and idx[n-1] — see _tryDecode.
-      const expected = 79 * winner.dec.samplesPerBit;
-      const measured = this.medianFrameSpan();
-      const isFractional = measured != null && (measured / expected) >= 1.0005;
-      if (fps === 24) return isFractional ? "23.976" : "24";
-      if (fps === 30) return isFractional ? "29.97" : "30";
-      if (fps === 60) return isFractional ? "59.94" : "60";
-    }
+    if (fps === 25 || fps === 50) return false;
+    if (fps !== 24 && fps !== 30 && fps !== 60) return null;
+    const winner = this.winner;
+    if (!winner) return null;
+    const expected = 79 * winner.dec.samplesPerBit;
+    const measured = this.medianFrameSpan();
+    if (measured == null) return null;
+    return (measured / expected) >= 1.0005;
+  }
+
+  // Carrier-rate key, purely from frame-span timing. No DF, no flag bits, no
+  // count-pattern inference. Returns one of:
+  //   "23.976" | "24" | "25" | "29.97" | "30" | "50" | "59.94" | "60"
+  // or null if not yet locked / not enough span samples.
+  carrierRate() {
+    const fps = this.nominalFps;
+    if (fps == null) return null;
     if (fps === 25) return "25";
     if (fps === 50) return "50";
+    const frac = this._carrierIsFractional();
+    if (frac == null) return null;
+    if (fps === 24) return frac ? "23.976" : "24";
+    if (fps === 30) return frac ? "29.97" : "30";
+    if (fps === 60) return frac ? "59.94" : "60";
     return null;
+  }
+
+  // Counting-cadence readout from the FF-sequence observer. Returns
+  // { fps, dropFrame, framesSeen, dfFlagMatches } or null until enough
+  // frames have been seen to be confident.
+  cadence() {
+    const cd = this.cadenceDetector;
+    const fps = cd.cadenceFps();
+    if (fps == null) return null;
+    const dropFrame = cd.isDropFrame();
+    return {
+      fps,
+      dropFrame: dropFrame ?? false,
+      dropFrameKnown: dropFrame != null,
+      framesSeen: cd.framesSeen,
+      dfFlagMatches: cd.dfFlagMatchesObservedCadence(),
+    };
+  }
+
+  // Combined SMPTE rate key blending carrier timing with the observed
+  // cadence's DF behaviour. Retained for callers (UI / publisher) that still
+  // want a single string. Prefer carrierRate() + cadence() going forward.
+  detectedRateKey() {
+    const carrier = this.carrierRate();
+    if (carrier == null) return null;
+    const cad = this.cadence();
+    const isDf = cad?.dropFrame === true;
+    if (isDf && carrier === "29.97") return "29.97df";
+    if (isDf && carrier === "59.94") return "59.94df";
+    // A DF cadence with a non-fractional carrier (e.g. integer 30 + DF count,
+    // the case in issue #1) has no canonical SMPTE rate key. Return the
+    // carrier rate; the cadence mismatch is surfaced separately.
+    return carrier;
+  }
+
+  // True if the carrier rate and counting cadence disagree in a way that
+  // wouldn't occur in spec-conformant material. e.g. carrier=30 with DF
+  // count, or carrier=29.97 (fractional) with 24-cadence count. Returns
+  // null until both detections are confident.
+  carrierCadenceMismatch() {
+    const carrier = this.carrierRate();
+    const cad = this.cadence();
+    if (carrier == null || cad == null) return null;
+    // Compare cadence fps to carrier's nominal integer fps.
+    const carrierNominalFps = rateKeyToNominalFps(carrier);
+    if (cad.fps !== carrierNominalFps) return true;
+    // DF only meaningful at 30 and 60 cadence; for DF to be in-spec the
+    // carrier must be the fractional 1.001-divided variant.
+    if (cad.dropFrame) {
+      const fractional = this._carrierIsFractional();
+      if (fractional === false) return true;  // integer 30/60 carrier + DF count
+    }
+    return false;
   }
 
   // Dropout rate over a rolling window: percentage of expected frames that
@@ -406,16 +431,11 @@ export class MultiRateDecoder {
     if (historyMs < 500) return null;
     const effectiveWindowSec = Math.min(windowSec, historyMs / 1000);
     const fps = winner.fps;
-    // Use the detected (possibly fractional) rate for the expected count.
-    const lf = dec.lastFrame;
-    let isFractional;
-    if (lf?.dropFrame && (fps === 30 || fps === 60)) isFractional = true;
-    else if (fps === 25 || fps === 50) isFractional = false;
-    else {
-      const expectedAtInteger = 79 * dec.samplesPerBit;
-      const measured = this.medianFrameSpan();
-      isFractional = measured != null && (measured / expectedAtInteger) >= 1.0005;
-    }
+    // Fractional-ness is a CARRIER property — decided by frame-span timing,
+    // not by the DF flag bit or the counting cadence. A "30 DF" stream
+    // (integer carrier with DF count) must report against 30 fps expected,
+    // not 29.97.
+    const isFractional = this._carrierIsFractional() === true;
     const actualFps = fps / (isFractional ? 1.001 : 1);
     const cutoff = now - windowSec * 1000;
     let count = 0;
@@ -455,20 +475,9 @@ export class MultiRateDecoder {
     const dec = winner.dec;
     const spans = dec.recentFrameSpans;
     if (!spans || spans.length < 10) return null;
-    const fps = winner.fps;
-    const lf = dec.lastFrame;
-    // Classification uses the median (robust to outliers) — same as
-    // detectedRateKey() so the two stay consistent.
-    let isFractional;
-    if (lf?.dropFrame && (fps === 30 || fps === 60)) {
-      isFractional = true;
-    } else if (fps === 25 || fps === 50) {
-      isFractional = false;
-    } else {
-      const median = this.medianFrameSpan();
-      const expectedAtInteger = 79 * dec.samplesPerBit;
-      isFractional = median != null && (median / expectedAtInteger) >= 1.0005;
-    }
+    // Fractional-ness is a CARRIER property — derived from frame-span timing,
+    // not the DF flag bit. Same primitive as carrierRate() / dropoutPct().
+    const isFractional = this._carrierIsFractional() === true;
     let sum = 0;
     for (let i = 0; i < spans.length; i++) sum += spans[i];
     const meanSpan = sum / spans.length;
