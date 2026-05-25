@@ -624,6 +624,9 @@ export default function SMPTEAnalyzer() {
   const currentSigTicksRef = useRef(0);
   const currentSigFlushTickRef = useRef(0);
   const lastBreakTRef = useRef(0);
+  // Most recently logged detected rate key, so we only push a log entry on
+  // transitions (e.g. 29.97df → 30 carrier flip) rather than every tick.
+  const lastLoggedRateRef = useRef(null);
   // Most recent worklet underrun: { t, gapMs, count } updated whenever the
   // audio thread reports a process()-call gap beyond ~2.5× the quantum.
   // Distinct from "no LTC signal" — the audio path itself was starved.
@@ -948,6 +951,26 @@ export default function SMPTEAnalyzer() {
     }
     lastErrSigRef.current = sig;
 
+    // Log detected-rate transitions (live mode only) so troubleshooting can
+    // see when the carrier/cadence classification flips. First lock counts as
+    // a transition from null → rateKey.
+    if (useRealAudio) {
+      const detRate = data.detectedRateKey ?? null;
+      if (detRate !== lastLoggedRateRef.current) {
+        const from = lastLoggedRateRef.current;
+        pushLog({
+          t: Date.now(),
+          tc: tcStr,
+          rate: detRate ?? "—",
+          errors: ["RATE_CHANGE", `${from ?? "none"}→${detRate ?? "none"}`],
+          levelDbFS: +lvl.toFixed(2),
+          snr: Number.isFinite(data.snr) ? +data.snr.toFixed(1) : null,
+          source: "live",
+        });
+        lastLoggedRateRef.current = detRate;
+      }
+    }
+
     // Log and publish continuity breaks as they happen.
     const lb = data.lastBreak;
     if (lb && lb.t !== lastBreakTRef.current) {
@@ -1024,6 +1047,7 @@ export default function SMPTEAnalyzer() {
     lastBreakTRef.current = 0;
     lastSeenCarrierRef.current = null;
     lastSeenCadenceRef.current = null;
+    lastLoggedRateRef.current = null;
   }, [useRealAudio]);
 
   // Attempt to start in live audio mode on first load. If the browser blocks

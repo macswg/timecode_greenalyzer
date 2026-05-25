@@ -368,15 +368,8 @@ export class MultiRateDecoder {
   // Whether the carrier is at a 1.001-divided NTSC rate vs the integer rate.
   // Decided ONLY by measured frame span — never by the LTC DF flag bit or by
   // the counting cadence. This is the load-bearing primitive that separates
-  // carrier-rate detection from counting-cadence detection.
-  //
-  // Sample-rate dependence: the 1.0005 threshold (half the 0.1% gap between
-  // integer and NTSC rates) is compared against a median whose resolution is
-  // one sample per 79-bit span. At 48 kHz the 30/29.97 margin is ~1.58
-  // samples — comfortable. At 44.1 kHz the 60/59.94 margin shrinks to ~1.45
-  // samples — still works. At a lower SR (e.g. 22.05 kHz) headroom collapses
-  // and classification becomes unreliable. If that surfaces in practice,
-  // switch to a ppm threshold against the mean span instead of the median.
+  // carrier-rate detection from counting-cadence detection. Uses the mean of
+  // recentFrameSpans for sub-sample precision (see carrierObservation).
   _carrierIsFractional() {
     return this.carrierObservation().fractional;
   }
@@ -398,19 +391,30 @@ export class MultiRateDecoder {
     const fps = this.nominalFps;
     const winner = this.winner;
     let medianSpan = null;
+    let meanSpan = null;
     if (winner) {
       const spans = winner.dec.recentFrameSpans;
       if (spans && spans.length >= 10) {
         const sorted = [...spans].sort((a, b) => a - b);
         medianSpan = sorted[Math.floor(sorted.length / 2)];
+        let sum = 0;
+        for (let k = 0; k < spans.length; k++) sum += spans[k];
+        meanSpan = sum / spans.length;
       }
     }
+    // Fractional classification uses the MEAN, not the median. The threshold
+    // sits exactly halfway between integer and 1.001-divided rates, and the
+    // per-frame span is integer-sample-resolution — the median snaps to a
+    // sample boundary and can flip across the threshold under normal jitter,
+    // even for a clean 29.97 carrier. The mean recovers sub-sample precision
+    // by averaging across the natural integer jitter (same reasoning as
+    // driftPpm). Median is still used for general reporting / debugging.
     let fractional = null;
     if (fps === 25 || fps === 50) {
       fractional = false;
-    } else if ((fps === 24 || fps === 30 || fps === 60) && winner && medianSpan != null) {
+    } else if ((fps === 24 || fps === 30 || fps === 60) && winner && meanSpan != null) {
       const expected = 79 * winner.dec.samplesPerBit;
-      fractional = (medianSpan / expected) >= 1.0005;
+      fractional = (meanSpan / expected) >= 1.0005;
     }
     let carrierRate = null;
     if (fps === 25) carrierRate = "25";
