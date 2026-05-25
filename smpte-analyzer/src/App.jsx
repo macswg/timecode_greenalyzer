@@ -653,6 +653,12 @@ export default function SMPTEAnalyzer() {
   // pin the marker forever.
   const peakHoldUntilRef = useRef(0);
   const lastErrSigRef = useRef("");
+  // Tick count of the currently-active error signature; rolled into the most
+  // recent session log entry's `count` field on transition (and periodically
+  // while sustained) so a repeating error isn't logged 60× — just once with
+  // an accurate tick count.
+  const currentSigTicksRef = useRef(0);
+  const currentSigFlushTickRef = useRef(0);
   const lastBreakTRef = useRef(0);
   // Rolling 60 s window of recent continuity breaks (performance.now() timestamps).
   // The decoder's `continuityBreaks` is a lifetime counter; for a long session
@@ -708,6 +714,18 @@ export default function SMPTEAnalyzer() {
     setSessionLog(prev => {
       const next = prev.length >= LOG_CAP ? prev.slice(prev.length - LOG_CAP + 1) : prev;
       return [...next, entry];
+    });
+  }
+  // Update the most recent log entry's `count` (used to roll up repeated
+  // ticks of the same error signature without flooding the log).
+  function updateLastLogCount(count) {
+    setSessionLog(prev => {
+      if (prev.length === 0) return prev;
+      const last = prev[prev.length - 1];
+      if (last.count === count) return prev;
+      const next = prev.slice(0, -1);
+      next.push({ ...last, count });
+      return next;
     });
   }
 
@@ -867,6 +885,11 @@ export default function SMPTEAnalyzer() {
     const sig = data.errors.join(",");
     const tcStr = formatTc(data.hh, data.mm, data.ss, data.ff, data.dropFrame);
     if (sig && sig !== lastErrSigRef.current) {
+      // Finalize tick count for the previous sustained event before pushing a
+      // new one, so the prior log entry reflects its full duration.
+      if (currentSigTicksRef.current > 0) {
+        updateLastLogCount(currentSigTicksRef.current);
+      }
       pushLog({
         t: Date.now(),
         tc: tcStr,
@@ -875,7 +898,24 @@ export default function SMPTEAnalyzer() {
         levelDbFS: +lvl.toFixed(2),
         snr: Number.isFinite(data.snr) ? +data.snr.toFixed(1) : null,
         source: useRealAudio ? "live" : "sim",
+        count: 1,
       });
+      currentSigTicksRef.current = 1;
+      currentSigFlushTickRef.current = 1;
+    } else if (sig && sig === lastErrSigRef.current) {
+      currentSigTicksRef.current += 1;
+      // Flush the live count into the log entry roughly once per second
+      // (~30 ticks) so the visible row updates while a long error persists,
+      // without doing a state write every tick.
+      if (currentSigTicksRef.current - currentSigFlushTickRef.current >= 30) {
+        updateLastLogCount(currentSigTicksRef.current);
+        currentSigFlushTickRef.current = currentSigTicksRef.current;
+      }
+    } else if (!sig && currentSigTicksRef.current > 0) {
+      // Error cleared — flush final count.
+      updateLastLogCount(currentSigTicksRef.current);
+      currentSigTicksRef.current = 0;
+      currentSigFlushTickRef.current = 0;
     }
     if (sig !== lastErrSigRef.current && publisherRef.current && sig) {
       publisherRef.current.send({
@@ -1201,6 +1241,8 @@ export default function SMPTEAnalyzer() {
     setErrorCount(0);
     setErrorCounts({ CLIP:0, HOT:0, LOW:0, DROPOUT:0, NOISE:0 });
     lastErrSigRef.current = "";
+    currentSigTicksRef.current = 0;
+    currentSigFlushTickRef.current = 0;
     sessionStartRef.current = Date.now();
   }
 
@@ -1223,9 +1265,9 @@ export default function SMPTEAnalyzer() {
   }
 
   function exportCSV() {
-    const header = "timestamp,timecode,from,rate,source,levelDbFS,snrDb,errors";
+    const header = "timestamp,timecode,from,rate,source,levelDbFS,snrDb,errors,count";
     const rows = sessionLog.map(e =>
-      `${new Date(e.t).toISOString()},${e.tc},${e.from ?? ""},${e.rate},${e.source},${e.levelDbFS},${e.snr ?? ""},${e.errors.join("|")}`
+      `${new Date(e.t).toISOString()},${e.tc},${e.from ?? ""},${e.rate},${e.source},${e.levelDbFS},${e.snr ?? ""},${e.errors.join("|")},${e.count ?? 1}`
     );
     downloadFile(`ltc-session-${Date.now()}.csv`, "text/csv", [header, ...rows].join("\n"));
   }
@@ -1913,6 +1955,7 @@ export default function SMPTEAnalyzer() {
                   <th style={{ padding:"4px 12px", fontWeight:"normal", textAlign:"right" }}>LEVEL</th>
                   <th style={{ padding:"4px 12px", fontWeight:"normal", textAlign:"right" }}>SNR</th>
                   <th style={{ padding:"4px 12px", fontWeight:"normal", textAlign:"left" }}>ERRORS</th>
+                  <th style={{ padding:"4px 12px", fontWeight:"normal", textAlign:"right" }}>COUNT</th>
                 </tr>
               </thead>
               <tbody>
@@ -1929,6 +1972,7 @@ export default function SMPTEAnalyzer() {
                       {e.snr == null ? "—" : `${e.snr.toFixed(1)} dB`}
                     </td>
                     <td style={{ padding:"3px 12px", color:"#ff3b3b", textAlign:"left" }}>{e.errors.join(" · ")}</td>
+                    <td style={{ padding:"3px 12px", color:"#888", textAlign:"right" }}>{e.count > 1 ? `×${e.count}` : ""}</td>
                   </tr>
                 ))}
               </tbody>
