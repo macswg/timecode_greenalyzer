@@ -1903,17 +1903,17 @@ export default function SMPTEAnalyzer() {
               <tbody>
                 {[...sessionLog].reverse().map((e, i) => (
                   <tr key={sessionLog.length - i} style={{ borderTop:"1px solid #111", color:"#999" }}>
-                    <td style={{ padding:"3px 12px", color:"#555" }}>{new Date(e.t).toLocaleTimeString()}</td>
-                    <td style={{ padding:"3px 12px", color:"#00ff88" }}>
+                    <td style={{ padding:"3px 12px", color:"#555", textAlign:"left" }}>{new Date(e.t).toLocaleTimeString()}</td>
+                    <td style={{ padding:"3px 12px", color:"#00ff88", textAlign:"left" }}>
                       {e.from ? <>{e.from} <span style={{color:"#555"}}>→</span> {e.tc}</> : e.tc}
                     </td>
-                    <td style={{ padding:"3px 12px", color:"#666" }}>{e.rate}</td>
-                    <td style={{ padding:"3px 12px", color: e.source === "live" ? "#00ff88" : "#666" }}>{e.source}</td>
+                    <td style={{ padding:"3px 12px", color:"#666", textAlign:"left" }}>{e.rate}</td>
+                    <td style={{ padding:"3px 12px", color: e.source === "live" ? "#00ff88" : "#666", textAlign:"left" }}>{e.source}</td>
                     <td style={{ padding:"3px 12px", color:"#888", textAlign:"right" }}>{e.levelDbFS} dBFS</td>
                     <td style={{ padding:"3px 12px", color: e.snr == null ? "#333" : e.snr < 10 ? "#ff6600" : "#888", textAlign:"right" }}>
                       {e.snr == null ? "—" : `${e.snr.toFixed(1)} dB`}
                     </td>
-                    <td style={{ padding:"3px 12px", color:"#ff3b3b" }}>{e.errors.join(" · ")}</td>
+                    <td style={{ padding:"3px 12px", color:"#ff3b3b", textAlign:"left" }}>{e.errors.join(" · ")}</td>
                   </tr>
                 ))}
               </tbody>
