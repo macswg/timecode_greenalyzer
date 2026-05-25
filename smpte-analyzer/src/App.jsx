@@ -627,6 +627,9 @@ export default function SMPTEAnalyzer() {
   // Most recently logged detected rate key, so we only push a log entry on
   // transitions (e.g. 29.97df → 30 carrier flip) rather than every tick.
   const lastLoggedRateRef = useRef(null);
+  // Tracks ltcLocked across ticks so we can log one entry per lock acquisition
+  // (false → true transition). Records the starting timecode for the run.
+  const lastLockedRef = useRef(false);
   // Most recent worklet underrun: { t, gapMs, count } updated whenever the
   // audio thread reports a process()-call gap beyond ~2.5× the quantum.
   // Distinct from "no LTC signal" — the audio path itself was starved.
@@ -951,6 +954,24 @@ export default function SMPTEAnalyzer() {
     }
     lastErrSigRef.current = sig;
 
+    // Log lock acquisition (live mode only) so the session log records the
+    // starting timecode of each run.
+    if (useRealAudio) {
+      const nowLocked = !!data.ltcLocked;
+      if (nowLocked && !lastLockedRef.current) {
+        pushLog({
+          t: Date.now(),
+          tc: tcStr,
+          rate: data.detectedRateKey ?? "—",
+          errors: ["LOCK_ACQUIRED"],
+          levelDbFS: +lvl.toFixed(2),
+          snr: Number.isFinite(data.snr) ? +data.snr.toFixed(1) : null,
+          source: "live",
+        });
+      }
+      lastLockedRef.current = nowLocked;
+    }
+
     // Log detected-rate transitions (live mode only) so troubleshooting can
     // see when the carrier/cadence classification flips. First lock counts as
     // a transition from null → rateKey.
@@ -1048,6 +1069,7 @@ export default function SMPTEAnalyzer() {
     lastSeenCarrierRef.current = null;
     lastSeenCadenceRef.current = null;
     lastLoggedRateRef.current = null;
+    lastLockedRef.current = false;
   }, [useRealAudio]);
 
   // Attempt to start in live audio mode on first load. If the browser blocks
