@@ -16,10 +16,14 @@ Three modes drive the analyzer:
   decoded LTC frames and from the FFT/time-domain analysis of the live
   buffer.
 - **File analysis mode:** an audio file dropped or picked via the AUDIO INPUT
-  panel is decoded and routed through the same `wireSourceToDecoder` path as
-  live audio. The decoder and all real-signal indicators work identically. The
-  file loops continuously and is silent on system output (never connected to
-  `ctx.destination`).
+  panel is decoded once via `decodeAudioData`, then fed to the biphase
+  decoder by a deterministic software-paced feeder (`startPacedDecoderFeed`)
+  rather than the worklet — headless audio graphs deliver buffer-source
+  samples in deferred bursts, which would otherwise contaminate the
+  wall-clock carrier classifier's per-frame timing. All real-signal
+  indicators work the same as in live mode. The file loops continuously and
+  is silent on system output (never connected to `ctx.destination`).
+  Session log entries from this mode are tagged `file`.
 - **Simulation mode:** the user has clicked **SWITCH TO SIMULATED
   TIMECODE**. The internal generator (`generateSimulatedAnalysis`) drives
   the display. Indicators that depend on real LTC decode (bit map, rate
@@ -41,8 +45,11 @@ hide; they show their dim state so the layout stays stable.
 | **LOCK** status badge | Active only when `frameValid === true` — requires positive evidence of a valid frame, not just absence of "false" | Always inactive |
 | **DF** status badge | Decoded `dropFrame` flag bit (bit 10 of the LTC frame) | Picked rate's drop-frame flag |
 | **CF** status badge | Decoded `colorFrame` flag bit (bit 11 of the LTC frame) | Hardcoded false |
-| Detected rate label | `MultiRateDecoder.detectedRateKey()` — fps from winning candidate + DF flag. **Color: orange (`#ffaa00`) for drop-frame rates, blue (`#3b9cff`) for non-drop.** Hidden during bootstrap; in live mode hidden until lock acquired. | Picked rate from dropdown. Same color rule applies. |
-| `DETECTED` / `DETECTING…` tag | Cyan when locked, grey otherwise | Hidden |
+| Carrier rate label | `MultiRateDecoder.carrierRate()` — committed integer-vs-fractional classification from the wall-clock LSQ classifier. Returns `null` until 5σ + 3-agreements have committed; while uncommitted a **MEASURING…** tag is shown next to the label. Color: orange (`#ffaa00`) when cadence is DF, blue (`#3b9cff`) otherwise. Hidden during bootstrap. | Picked rate from dropdown. Same color rule. |
+| Cadence label (`DF` / `ND` / `ND?`) | `CadenceDetector` (`cadence().dropFrame` plus `dropFrameKnown`) — observed independently from carrier timing by watching the FF sequence and minute-boundary behaviour. Renders red when `carrierCadenceMismatch().result === true` at high confidence. | Picked rate's drop-frame flag |
+| `MEASURING…` / `DETECTED` / `DETECTING…` tag | `MEASURING…` (orange) while locked but the carrier classifier hasn't committed; `DETECTED` (cyan) when locked and committed; `DETECTING…` when no lock yet | Hidden |
+| `⚠ NON-CONFORMANT` line | `carrierCadenceMismatch()` with `result === true` and `confidence === "high"`. Shown only at high confidence so MEASURING states don't fire false alarms. Text contains the specific reason (e.g. `integer 30 fps carrier carrying DF count`). | Hidden |
+| `⚠ DF FLAG BIT DISAGREES WITH COUNT BEHAVIOUR` line | `cadence().dfFlagMatches === false` — the parsed bit-10 DF flag from the LTC frame contradicts the cadence inferred from FF behaviour. The bit itself is observed but not trusted as ground truth. | Hidden |
 
 ---
 
@@ -90,14 +97,19 @@ old decoder had thousands of accumulated frames while the new correct
 decoder had thousands of accumulated *bit errors* from running against
 the wrong rate. A windowed count decays naturally across the change.
 
+The integer-vs-fractional decision (e.g. 30 vs 29.97) is **not** made by
+the winner score; it is made by the separate wall-clock LSQ classifier
+(see below). Until that classifier commits, `detectedRateKey()` returns
+`null` and the UI shows MEASURING.
+
 | Indicator | Source |
 |---|---|
-| Per-rate bar (each row) | Real `framesDecoded` of that candidate decoder. Reaches 100% width at ≈60 clean frames (~2 s). Cumulative — does **not** decay |
-| Active rate dot (green ●) | The winner's mapped rate key (`detectedRateKey()`), including DF/NDF resolved from the parsed `dropFrame` flag |
-| **CONFIDENCE** bar | `100 − dropoutPct(2 s window)`, clamped 0–99.5 (falls back to 25 for the first ~0.5 s before the window has data). Tracks **recent** decode quality so it self-clears within a couple of seconds after a rate change, rather than waiting ~60 s for cumulative bit-error counts to wash out |
+| **DETECTED RATE** bar | Single bar showing the current winning candidate. Fill = `min(100, framesDecodedInLast20s × 100/60)` — reaches 100% after ~60 clean frames within the rolling window |
+| Rate label next to bar | `SMPTE_RATES[detectedRateKey()].label`, or `—` while MEASURING |
+| Active dot (green ●) | Present once the winner exists |
+| **CONFIDENCE** bar (TIMECODE card) | `100 − dropoutPct(2 s window)`, clamped 0–99.5 (falls back to 25 for the first ~0.5 s before the window has data). Tracks **recent** decode quality so it self-clears within a couple of seconds after a rate change, rather than waiting ~60 s for cumulative bit-error counts to wash out |
 
-In sim mode there are no real candidate scores; only the picked rate's bar
-shows, scaled by the sim's confidence proxy.
+In sim mode the picked rate's bar shows scaled by the sim's confidence proxy.
 
 ---
 
@@ -112,9 +124,12 @@ cells per SMPTE ST 12-1 Table 2:
 - **Bits 64–79** — the fixed 16-bit sync word `0011111111111101`. Cyan-filled
   = 1, dim cyan = 0. A successful decode requires this pattern, so when
   locked these bits always match.
+- **Bit 10 (DF flag)** — overlaid with a `D` glyph. The glyph is black on
+  the green fill when the flag is set, orange on the dim background when
+  it is cleared, so the DF bit's state is readable at a glance.
 - **No frame yet** — all cells dim grey.
 
-Tooltips show bit index, sync-word membership, and decoded value.
+Tooltips show bit index, sync-word / DF-flag membership, and decoded value.
 
 | Below-grid readout | Source |
 |---|---|
@@ -166,9 +181,27 @@ sim's purpose.
 | **BIT ERRORS** | `MultiRateDecoder.bitErrors` |
 | **INPUT LEVEL** | Shows `—` — `analysis.rmsDbFS` is not populated in the live path; the meters in SIGNAL LEVEL are the source of truth |
 | **SAMPLE RATE** | `audioContext.sampleRate` (Hz) for live mic input. When a file is playing: `{fileNativeRate} Hz file · {ctx.sampleRate} Hz decoded` — the native rate is parsed from the WAV RIFF header by `readWavSampleRate()`; non-WAV files show only the decoded rate |
-| **CLOCK DRIFT** | `MultiRateDecoder.driftPpm()`, EMA-smoothed. Deviation of measured frame period from exact expected SMPTE rate, in ppm. `—` until 10 decoded frames. States: `SOLID` (<5 ppm, green) · `DRIFTING` (5–50 ppm, orange) · `OFF-RATE` (>50 ppm, red) |
+| **CLOCK DRIFT** | `MultiRateDecoder.driftPpmSourceVsHostQuartz()`, EMA-smoothed. Deviation of the source LTC clock from the host machine's quartz (derived from the wall-clock LSQ that drives carrier classification — immune to capture-device ADC bias). `—` until the classifier has committed. States: `<5 ppm LOCKED` (green) · `5–500 ppm OK TO CHASE` (cyan) · `>500 ppm CHECK RATE` (amber — large enough to imply a mis-detected rate). The host quartz is itself undisciplined (typically ±50 ppm absolute on consumer hardware), so this is drift relative to the host crystal, not absolute. A second drift readout (source → ADC) and the difference (CAPTURE CLOCK ERROR) live in the AUDIT panel. |
 | **DROPOUT RATE** | `MultiRateDecoder.dropoutPct(2)`, EMA-smoothed. Percentage of expected frames not decoded over a rolling 2-second window: `100 × (1 − decoded / (window_sec × detected_fps))`. `—` until the winner is established. States: `CLEAN` (<1%, green) · `OCCASIONAL` (1–10%, orange) · `FREQUENT` (10–50%, amber) · `SEVERE` (>50%, red) |
 | **CONTINUITY · 60s** | Count of frames in a **rolling 60-second window** where `HH:MM:SS:FF` did not advance by exactly one frame (drop-frame rules applied). Green `● CONTINUOUS · 0 BREAKS` when clean. Amber `N BREAKS · last: TYPE ±Δ @ HH:MM:SS:FF` when at least one break is in-window (the `last: …` detail is shown only when `lastBreak` itself is within the 60 s window). Break types — `REPEAT` (delta = 0, freeze frame), `JUMP` (delta > 1, edit splice / dropout), `REWIND` (delta < 0, rewind / freewheel reset). The full break history is still in the session log. Gaps ≥ 500 ms between decoded frames reset continuity *tracking* (not the counter) to avoid a spurious JUMP across the gap; gaps ≥ 3 s also clear the break counter on the resuming frame, on the basis that a long signal stop starts a new run. |
+
+---
+
+## AUDIT panel
+
+Collapsed by default under the LIVE INPUT STATUS readouts. Exposes the
+raw measurement numbers behind the carrier classification so an engineer
+can audit the analyzer's conclusions instead of taking them on faith.
+
+| Row | Source |
+|---|---|
+| **MEASURED FPS** | `carrierObservation().stable.fps`, with its 1σ uncertainty expressed in ppm of the nominal rate (`stable.sigmaFps`). σ is floored by the `performance.now()` quantization to prevent over-confidence when residuals happen to be tiny |
+| **WINDOW** | `stable.n` frames over `stable.spanSec` seconds — the stable LSQ window. Fills toward the 20 s target as code rolls |
+| **CLASS** | `fractional / integer` plus `classConfidence`, or `MEASURING (k/3)` while the agreement counter is accumulating toward the 3-agreements commit threshold |
+| **SOURCE → HOST QUARTZ** | Same value as the LIVE INPUT STATUS CLOCK DRIFT row; shown again here for context next to the other drifts. Positive = source faster than host crystal |
+| **SOURCE → ADC** | `driftPpmSourceVsAdc()` — drift derived from the capture device's sample count instead of host time. Compares the source against whatever clock drives the audio interface's ADC |
+| **CAPTURE CLOCK ERROR** | `captureClockErrorPpm()` = host − ADC drift with the LTC source as the common reference. Row turns amber if magnitude exceeds 100 ppm — a healthy capture chain should agree within tens of ppm, so a large value suggests a faulty interface, an in-line sample rate converter, or a mislabeled file rate |
+| **perf.now() RES** | Probed quantization of `performance.now()` on this browser / cross-origin-isolation context. Bounds the σ floor for the carrier classifier; 100 µs is typical, 1 ms means the browser is coarse-clamping clocks for Spectre mitigation |
 
 ---
 
@@ -207,19 +240,23 @@ The published wire format is documented in
 
 ## SESSION LOG panel
 
-- **Entry count** — number of error events (deduped per error-set
-  transition) since the session started.
-- **ERROR EVENTS** — same as above; cumulative since session start /
-  CLEAR.
+- **Entry count** — total logged events since session start.
+- **ERROR EVENTS** — count of error-set transitions; cumulative since
+  session start / CLEAR.
 - **FRAMES** — total tick count (≈30 Hz) since the session started.
 - **CSV / JSON export buttons** — download a file containing every logged
-  error event with ISO timestamp, decoded TC, rate, source (`live` / `sim`),
-  level in dBFS, and the error tag list.
+  event with ISO timestamp, decoded TC, rate, source (`live` / `file` /
+  `sim`), level in dBFS, SNR, and the event/error tag list.
 - **CLEAR button** — empties the log and resets the error counter and
   session start time.
 
-The log captures one entry per error-set transition (not per tick), so
-30 ticks/s of CLIP doesn't produce 30 rows.
+Logged event types include error-set transitions (deduped — 30 ticks/s
+of CLIP doesn't produce 30 rows), `LOCK_ACQUIRED` (after 5 s sustained
+lock), `MEASURING_COMMIT` / `RATE_CHANGE` / `DIVERGENCE` from the carrier
+classifier, periodic `CARRIER_SNAPSHOT` heartbeats (every 30 s with the
+current measurement and drift numbers), and continuity breaks
+(`TC_REPEAT` / `TC_JUMP` / `TC_REWIND`). On-screen timestamps render in
+24-hour format.
 
 ---
 
