@@ -20,12 +20,17 @@ For a full list of every on-screen indicator and where its value comes from, see
 timecode_greenalyzer/
 ├── smpte-analyzer/     Vite + React app — the analyzer UI
 │   ├── src/
-│   │   ├── App.jsx         Root component, UI, audio glue
-│   │   ├── ltcDecoder.js   Biphase decoder, MultiRateDecoder
-│   │   ├── publisher.js    Reconnecting WebSocket publisher
-│   │   └── tickWorker.js   Web Worker tick source
-│   └── public/
-│       └── ltc-worklet.js  AudioWorklet sample capture
+│   │   ├── App.jsx              Root component, UI, audio glue
+│   │   ├── ltcDecoder.js        Biphase decoder, MultiRateDecoder, wall-clock carrier classifier
+│   │   ├── cadenceDetector.js   FF-sequence cadence inference, DF skip detection
+│   │   ├── dropFrame.js         Drop-frame math (framesToTc, dropPerMin)
+│   │   ├── ltcSynth.js          LTC synthesizer (independent carrier / cadence knobs)
+│   │   ├── publisher.js         Reconnecting WebSocket publisher
+│   │   └── tickWorker.js        Web Worker tick source
+│   ├── public/
+│   │   └── ltc-worklet.js       AudioWorklet sample capture (wall-clock stamped)
+│   └── test/
+│       └── ltcDecoder.test.js   Unit tests (Vitest)
 └── smpte-bridge/       Node WS sidecar — fan-out to subscribers
     └── src/index.js
 ```
@@ -91,7 +96,7 @@ Three status flags appear alongside the display:
 
 ---
 
-### Frame Rate Detection
+### Carrier Rate and Counting Cadence (separate observations)
 
 The analyzer detects all frame rates defined in SMPTE ST 12-1:
 
@@ -108,7 +113,29 @@ The analyzer detects all frame rates defined in SMPTE ST 12-1:
 | 59.94 | 59.94 ND | 60000/1001 | No |
 | 60 | 60 ND | 60 | No |
 
-In live audio mode, rate detection is fully automatic: five `LtcDecoder` instances run in parallel at 24/25/30/50/60 fps candidates and the winner is chosen by frames-decoded score. NDF vs DF is resolved from the drop-frame flag in the parsed frame. Fractional rates (29.97 NDF, 23.976, 59.94 NDF) are distinguished from their integer counterparts by comparing the median measured frame span against the integer-rate expected span at a 1.0005× threshold. A confidence bar shows the current lock strength.
+The analyzer treats **carrier rate** (how fast frames physically arrive: integer 30 vs the 1.001-divided 29.97) and **counting cadence** (how the FF field counts and whether it skips at minute boundaries: DF / NDF) as two independent observations. They are decided by different mechanisms and only combined at the UI, so an off-spec source — e.g. an integer-30 carrier carrying a DF count — is correctly identified instead of being silently re-labeled.
+
+**Candidate selection.** Five `LtcDecoder` instances run in parallel at 24/25/30/50/60 fps. The winner is scored on a **windowed** basis: frames decoded in the last 20 s plus a recency bonus for a frame decoded within the last 500 ms. Cumulative scoring was reverted because stale bit errors from a previous rate could keep the wrong decoder ahead for ~60 s after a real rate change.
+
+**Counting cadence.** `CadenceDetector` (`src/cadenceDetector.js`) watches the decoded FF sequence and minute-boundary behaviour to infer the counting cadence (24/25/30/50/60) and whether the count drops frames at minute boundaries, without consulting carrier timing. The DF flag bit in the LTC frame is observed but not trusted — `dfFlagMatchesObservedCadence()` reports disagreement separately.
+
+**Carrier rate — measurement-grade, wall-clock-referenced.** Distinguishing integer rates (30, 60, 24) from their 1.001-divided NTSC siblings (29.97, 59.94, 23.976) requires resolving a 1000 ppm gap. The previous classifier used sample-count timing, which is contaminated by the capture device's ADC clock running ±tens of ppm off nominal — that produced spurious flips every 6–14 s on clean 29.97 sources. The current classifier instead measures wall-clock frame arrival times referenced to the host quartz:
+
+- The audio worklet stamps `performance.now()` at each chunk boundary; the decoder interpolates per-frame arrival times across the chunk.
+- A least-squares regression of frame-index vs wall-clock-time runs over a 20 s **stable window** + 3 s **detector window**.
+- **Commit rule:** the stable estimate must sit ≥5σ off the integer/fractional midpoint **and** produce 3 consecutive same-side measurements ≥1 s apart. Until committed, the rate label reads **MEASURING**.
+- **Divergence rule:** once committed, the detector window watches for source rate changes; the same 5σ + 3-agreements hysteresis applies before invalidating the commit (genuine rate change confirmed in ~3–5 s; single-shot noise blips suppressed).
+- **Hold:** on signal loss (>500 ms without a fresh frame) the committed classification is held for 5 s, then dropped back to MEASURING.
+
+**NON-CONFORMANT warning.** `carrierCadenceMismatch()` raises a high-confidence warning when the observed carrier rate and counting cadence are inconsistent (e.g. integer-30 carrier carrying a DF count, or a fractional carrier carrying a 24-cadence count). The warning is suppressed while either side is still MEASURING so operators are not alarmed by transient states.
+
+**AUDIT panel.** Collapsed by default under the LIVE INPUT STATUS readouts, the AUDIT panel exposes the raw measurement numbers behind the classification: measured fps with ±ppm uncertainty, window size, commit-state agreement counter, three drift readouts (see below), and the measured `performance.now()` resolution on the current browser. Engineers can audit the analyzer's conclusions instead of taking them on faith.
+
+**Two drift readouts.** Both are measurement-grade:
+
+- **Source → host quartz** (primary, in the LIVE INPUT STATUS panel) — deviation of the source clock from the host machine's quartz, derived from the wall-clock LSQ. EMA-smoothed. Thresholds: `<5 ppm LOCKED` (green), `5–500 ppm OK TO CHASE` (cyan), `>500 ppm CHECK RATE` (amber). Drift is a steady frequency offset; it does **not** affect chase-ability — chasing is governed by dropout rate and continuity, not by ppm. The host quartz is itself undisciplined (typically ±50 ppm absolute on consumer hardware), so this is drift relative to your machine's crystal, not absolute.
+- **Source → ADC** (in the AUDIT panel) — drift derived from the capture device's sample count rather than host time. Compares the source against whatever clock drives the audio interface's ADC.
+- **Capture clock error** (= host − ADC, with the LTC source as common reference) — surfaced in the AUDIT panel and flagged amber if it exceeds ±100 ppm, indicating a faulty interface, an in-line sample rate converter, or a mislabeled file rate.
 
 ---
 
@@ -160,10 +187,17 @@ Per **SMPTE ST 12-1 Table 2**, the 80-bit frame layout is:
 | 48–51 | Hours units (BCD) |
 | 52–55 | User bits group 7 |
 | 56–57 | Hours tens (BCD) |
-| 58 | Binary group flag BGF1 |
+| 58 | Binary group flag BGF1 — **or** frame-tens MSB in the HFR variant (see below) |
 | 59 | Binary group flag BGF2 |
 | 60–63 | User bits group 8 |
 | 64–79 | Sync word: `0011111111111101` |
+
+**High-frame-rate (HFR) variant.** The standard 2-bit frame-tens field only encodes FF values 0–39, which is enough for cadences up to 30. SMPTE ST 12-1:2014 §6.6 defines an HFR variant for 50/60-fps systems that repurposes bit 58 (formerly BGF1) as a third frame-tens bit, expanding the field to 3 bits so FF can reach 79.
+
+This analyzer always reads bit 58 as part of frame tens, in every decoded frame, regardless of detected rate. Caveats to be aware of:
+
+- A strictly-spec-conformant generator at a ≤30 cadence that uses binary group flags will mis-decode FF whenever BGF1 happens to be set. The analyzer does not surface binary group flag data anywhere, so the practical impact is limited, but it's a real departure from the standard variant.
+- Real-world HFR generators are not unanimous about which bit becomes the extra frame-tens MSB. Some vendors use bit 35 or bit 59 instead of bit 58. We follow ST 12-1:2014 (bit 58). A generator that uses a different bit will mis-decode at FF≥40; that's a per-vendor compatibility issue, not an analyzer bug.
 
 **Sync word** (bits 64–79): `0011111111111101`  
 This 16-bit pattern is unique — it cannot occur in valid BCD timecode data or in the biphase encoding of any other legal bit sequence, which allows the decoder to frame-align reliably.
@@ -246,9 +280,9 @@ In live mode the CLIP/HOT/LOW/DROPOUT tags come exclusively from real level meas
 
 ---
 
-### Bit Integrity Map
+### Frame Integrity Map
 
-An 8×8 grid of 64 cells visualizes the bit-error distribution across recent frames. Each cell represents a decoded bit region; red cells indicate a detected error (short transition, long gap, or sync word mismatch). The total error count is shown below the grid.
+A 20-column grid of 80 cells visualizes the bits of the most recently decoded LTC frame, per SMPTE ST 12-1 Table 2. Data bits (0–63) render in green; the sync word (bits 64–79) renders in cyan. Bit 10 (the DF flag) is marked with a `D` glyph so its state is readable at a glance. The cumulative bit-error count is shown below the grid.
 
 ---
 
@@ -260,7 +294,7 @@ The total number of frames analyzed and the cumulative error count are shown in 
 
 ### Session Log
 
-The app maintains an in-session error log that captures each distinct error-state transition with timestamp, timecode, rate, source (live or sim), and level. The log can be exported as CSV or JSON. Clearing the log also resets the error counter.
+The app maintains an in-session log that captures each distinct error-state transition, lock acquisition, continuity break, and carrier-rate event (MEASURING_COMMIT, RATE_CHANGE, DIVERGENCE) with timestamp (24-hour), timecode, rate, source (`live` / `file` / `sim`), level, and SNR. The log can be exported as CSV or JSON. Clearing the log also resets the error counter.
 
 ---
 
@@ -271,21 +305,24 @@ The app maintains an in-session error log that captures each distinct error-stat
 On startup the app calls `getUserMedia` immediately and attempts to open the default audio input. If the browser blocks this before a user gesture (common in some browsers) or the user denies access, the app surfaces the error and falls back to simulation mode until the user clicks **CONNECT AUDIO INPUT**.
 
 When live audio is active:
-- A device picker (`enumerateDevices`) lets you select among all available audio inputs. Switching reopens the stream with the selected `deviceId`. The app listens for `devicechange` events and updates the list automatically.
-- An `AudioWorklet` (`ltc-worklet.js`) runs on the audio thread and forwards every sample to the main thread without dropping any between reads. The `MultiRateDecoder` (`ltcDecoder.js`) receives these samples and runs five `LtcDecoder` instances in parallel at 24/25/30/50/60 fps. The winner is selected by score (frames decoded minus a weighted bit-error penalty, with a recency bonus for frames decoded within the last 500 ms).
+- A device picker (`enumerateDevices`) lets you select among all available audio inputs. Switching reopens the stream with the selected `deviceId`. The app listens for `devicechange` events and updates the list automatically. For multi-channel inputs, a channel picker selects which channel is tapped for LTC.
+- An `AudioWorklet` (`ltc-worklet.js`) runs on the audio thread, forwards every sample to the main thread without drops, and stamps `performance.now()` at each chunk's start and end so the decoder can recover true wall-clock arrival time per frame independent of ADC sample-clock drift. The `MultiRateDecoder` (`ltcDecoder.js`) receives these samples and runs five `LtcDecoder` instances in parallel at 24/25/30/50/60 fps; the winner is scored on a 20 s rolling window of decoded frames plus a recency bonus for a frame within the last 500 ms.
 - The timecode digits (HH:MM:SS:FF) shown in the display come directly from the decoded LTC frame. If no valid frame has been decoded within ~200 ms, the display shows `00:00:00:00` and LOCK turns off.
 - SNR, THD, and noise floor are computed from the FFT (`computeLtcSpectralMetrics`) and only populated when locked; otherwise they show `—`. All three are EMA-smoothed (~0.5 Hz bandwidth, ~2 s settle) to reduce per-tick jitter.
-- A **Clock Drift** indicator in the LIVE INPUT STATUS panel shows deviation of the measured frame period from the exact expected SMPTE rate in parts-per-million. States: `SOLID` (<5 ppm, green), `DRIFTING` (5–50 ppm, orange), `OFF-RATE` (>50 ppm, red).
+- The CARRIER RATE line shows the committed classification (e.g. `29.97` or `30`), or **MEASURING** while the wall-clock classifier is still accumulating evidence; cadence (`DF` / `ND` / `ND?`) is displayed independently and turns red if it disagrees with the carrier (NON-CONFORMANT).
+- The CLOCK DRIFT readout (source → host quartz) replaces the previous integer-rate-based drift number. See [Carrier Rate and Counting Cadence](#carrier-rate-and-counting-cadence-separate-observations) for the three drift readouts and thresholds.
 
 To use with real LTC: connect a timecode source to an audio interface input and select that interface in the device picker.
 
 ### File Analysis Mode
 
-The AUDIO INPUT panel accepts audio files via drag-and-drop anywhere on the panel, or by clicking **ANALYZE FILE…** / **REPLACE FILE**. The file is decoded by the Web Audio API and routed through the same biphase decoder as a live input. The file loops continuously.
+The AUDIO INPUT panel accepts audio files via drag-and-drop anywhere on the panel, or by clicking **ANALYZE FILE…** / **REPLACE FILE**. The file is decoded by the Web Audio API and routed through the biphase decoder. The file loops continuously.
 
 Key properties:
 - The file is **never connected to `ctx.destination`** — it is silent on the system output (ANALYSIS ONLY · NO OUTPUT).
 - For WAV files, the native sample rate from the file header is displayed alongside the context's resampled rate (Web Audio always resamples to the context's rate on decode).
+- The decoder is fed by a deterministic, software-paced sample feeder (`startPacedDecoderFeed`) rather than the worklet path used for live input. Headless audio graphs deliver buffer-source samples in deferred bursts, which would otherwise contaminate the wall-clock LSQ classifier's per-frame timing.
+- Session log entries from file analysis are tagged `file` (distinct from `live` and `sim`).
 - The status label reads `FILE filename · Xs · LOOPED · ANALYSIS ONLY · NO OUTPUT` while a file is playing.
 - Click **STOP FILE** to tear down file playback and return to live audio input.
 
@@ -318,3 +355,4 @@ Every tick emits a `{type:"tc"}` message. Each error-state transition emits a `{
 | 1.1 | 2026-05-12 | Live biphase decode wired (MultiRateDecoder + AudioWorklet); auto rate detection; device picker; API publisher; session log; Web Worker tick |
 | 1.2 | 2026-05-12 | File-drop analysis path; `wireSourceToDecoder()` shared between mic and file paths; WAV native rate display; real SNR/THD/noise-floor via `computeLtcSpectralMetrics()`; EMA smoothing on gauges; clock drift/chase indicator; fractional rate detection (29.97 NDF / 23.976 / 59.94 NDF); frame-span sanity check; biphase tolerance tightened ±25% → ±15%; rate label color-coded (DF orange / NDF blue); B612 Mono timecode font; mobile responsive CSS; NOISE error tag removed from live mode |
 | 1.3 | 2026-05-12 | Continuity detection (REPEAT / JUMP / REWIND break types, per-frame queue drain, 500 ms gap reset); dropout rate (2-second rolling window, CLEAN / OCCASIONAL / FREQUENT / SEVERE); drift uses mean of recentFrameSpans (not median) for sub-sample precision; recentFrameSpans cap raised 30 → 120 frames; lock indicator and LOCKED banner changed from cyan to green (`#00ff88`); 47.95 and 48 fps removed from SMPTE_RATES; ST 12-2 references removed; app header updated to `ST 12-1:2014 COMPLIANT · LTC`; file status label changed to `ANALYSIS ONLY · NO OUTPUT`; `{type:"continuity"}` API publisher message |
+| 1.4 | 2026-05-25 | Carrier rate and counting cadence split into independent observations (`CadenceDetector` in its own module); measurement-grade wall-clock LSQ carrier classifier (worklet stamps `performance.now()` at chunk boundaries; LSQ regression over 20 s stable + 3 s detector windows; 5σ + 3-agreements commit and divergence rules; MEASURING state in UI); HFR frame layout support (FF up to 79 via bit 58 repurpose per ST 12-1:2014 §6.6); `carrierCadenceMismatch()` raises high-confidence NON-CONFORMANT warning for off-spec sources (e.g. integer-30 carrier with DF count); AUDIT panel exposes raw measurement numbers; two drift readouts (source → host quartz primary, source → ADC diagnostic, CAPTURE CLOCK ERROR cross-check); LOCK_ACQUIRED log entries (5 s sustained requirement); file analysis uses deterministic software-paced decoder feeder; session log SRC column distinguishes `file` from `live`; session log timestamps in 24-hour; FRAME INTEGRITY grid marks DF flag (bit 10) with a `D` glyph; SMPTE SPEC REFERENCE panel documents every reported quantity; `ltcSynth.js` with independent carrier and cadence knobs; Vitest unit-test suite (55 tests) covering the new classifier. Closes #1 (30 DF detection) and #29 (measurement-grade carrier classification) |

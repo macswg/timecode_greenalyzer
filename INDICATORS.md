@@ -161,7 +161,6 @@ sim's purpose.
 
 | Row | Source |
 |---|---|
-| **DETECTED RATE** | `MultiRateDecoder.detectedRateKey()`, formatted via `SMPTE_RATES[key].label` |
 | **LOCK STATE** | `● LOCKED` (green `#00ff88`) / `○ NO SIGNAL` from `ltcLocked` |
 | **FRAMES DECODED** | `MultiRateDecoder.framesDecoded` |
 | **BIT ERRORS** | `MultiRateDecoder.bitErrors` |

@@ -31,7 +31,11 @@ const MIME = {
 const subscribers = new Set();
 let publisher = null;
 let lastTc = null;
-let stats = { framesIn: 0, framesOut: 0, errorsIn: 0, startedAt: Date.now() };
+// framesOut: count of tc messages forwarded (per ingest message, not per
+// subscriber). fanoutSends: total ws.send() calls across all subscribers
+// (framesOut × current subscriber count, roughly), useful for diagnosing
+// fan-out load.
+let stats = { framesIn: 0, framesOut: 0, fanoutSends: 0, errorsIn: 0, startedAt: Date.now() };
 
 async function serveStatic(req, res) {
   if (req.method !== "GET" && req.method !== "HEAD") {
@@ -110,8 +114,9 @@ wssIngest.on("connection", (ws, req) => {
     if (msg.type === "tc") { stats.framesIn++; lastTc = msg; }
     else if (msg.type === "error") { stats.errorsIn++; }
     const payload = JSON.stringify(msg);
+    if (msg.type === "tc") stats.framesOut++;
     for (const s of subscribers) {
-      if (s.readyState === 1) { s.send(payload); stats.framesOut++; }
+      if (s.readyState === 1) { s.send(payload); stats.fanoutSends++; }
     }
   });
 

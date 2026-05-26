@@ -1,13 +1,19 @@
 // Reconnecting WebSocket publisher for the SMPTE bridge sidecar.
 // Usage: const p = new Publisher(url); p.connect(); p.send(payload); p.close();
 // Listen via p.on("state", fn) / p.on("status", fn).
+//
+// Wire-format timestamps: every payload's `t` field is wall-clock ms since
+// Unix epoch (Date.now()). Internally the analyzer also uses performance.now()
+// for monotonic intervals (decoder lastFrame.t, lastBreak.t, recent-break
+// window), but those never reach the wire — call sites convert to Date.now()
+// at the publisher boundary. Subscribers should treat all received `t` values
+// as the same epoch-based clock.
 
 export class Publisher {
   constructor(url) {
     this.url = url;
     this.ws = null;
     this.state = "idle"; // idle | connecting | open | closed | error
-    this.subscriberCount = 0;
     this.listeners = { state: new Set(), status: new Set() };
     this.reconnectMs = 1000;
     this.shouldRun = false;
@@ -37,7 +43,6 @@ export class Publisher {
         try {
           const msg = JSON.parse(e.data);
           if (msg.type === "status") {
-            this.subscriberCount = msg.subscribers ?? 0;
             this._emit("status", msg);
           }
         } catch { /* ignore */ }
