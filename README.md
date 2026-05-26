@@ -347,6 +347,12 @@ Every tick emits a `{type:"tc"}` message. Each error-state transition emits a `{
 
 ---
 
+## License
+
+Released under the [MIT License](LICENSE) © 2026 Sean Green. You are free to use, modify, and redistribute the code, including in commercial and proprietary work, provided the copyright notice and license text are retained in copies or substantial portions of the software.
+
+---
+
 ## Revision History
 
 | Version | Date | Notes |
