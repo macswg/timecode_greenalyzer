@@ -26,3 +26,7 @@ pnpm-debug.log*
 
 # Claude Code local state (settings, worktrees, etc.) — never commit
 .claude/
+
+# SMPTE Standards -- not public
+/smpte-standards
+
