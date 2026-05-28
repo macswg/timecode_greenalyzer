@@ -691,6 +691,11 @@ export default function SMPTEAnalyzer() {
   const [errorCounts, setErrorCounts] = useState({ CLIP:0, HOT:0, LOW:0, DROPOUT:0, NOISE:0, DF_INVALID:0, AUDIO_GAP:0 });
   const [sessionLog, setSessionLog] = useState([]);
   const audioCtxRef = useRef(null);
+  // Offset (in ms) added to audio-clock-domain chunk stamps from the worklet
+  // to translate them into main-thread performance.now() domain. Computed
+  // once per wired source via AudioContext.getOutputTimestamp(); see
+  // wireSourceToDecoder. Null until the first samples message.
+  const audioClockOffsetMsRef = useRef(null);
   const analyserRef = useRef(null);
   const sourceRef = useRef(null);
   const rafRef = useRef(null);
@@ -1540,6 +1545,12 @@ export default function SMPTEAnalyzer() {
     // doesn't average across two clocks.
     sampleClockRef.current = { n: 0, marks: [] };
     measuredRateEmaRef.current = null;
+    // Re-measure the audio-clock → main-thread perf.now() offset on the next
+    // worklet message. The offset is constant for the AudioContext, but
+    // resetting per-source guarantees we sample it while the new graph is
+    // actually running (getOutputTimestamp can be stale when ctx was just
+    // suspended).
+    audioClockOffsetMsRef.current = null;
     worklet.port.onmessage = (e) => {
       const msg = e.data;
       if (msg.type === "glitch") {
@@ -1549,7 +1560,30 @@ export default function SMPTEAnalyzer() {
       }
       // type === "samples"
       const samples = msg.samples;
-      decoder.feed(samples, sampleRateRef.current, msg.chunkWallStart, msg.chunkWallEnd);
+      // The worklet stamps chunkWallStart/End in AudioContext audio-clock
+      // domain (currentTime*1000), which has a different time origin than
+      // main-thread performance.now() — the freshness check (App.jsx:905)
+      // and dropoutPct compare lf.t against main-thread performance.now(),
+      // so we must translate. AudioContext.getOutputTimestamp() returns
+      // paired (contextTime in s, performanceTime in ms); the offset is
+      // constant for the lifetime of the context, so cache it once.
+      // Chunk-to-chunk deltas are preserved exactly, so the LSQ carrier-rate
+      // classifier still reads against the host quartz via this offset.
+      if (audioClockOffsetMsRef.current == null) {
+        try {
+          const ots = ctx.getOutputTimestamp();
+          if (ots && Number.isFinite(ots.contextTime) && Number.isFinite(ots.performanceTime)) {
+            audioClockOffsetMsRef.current = ots.performanceTime - ots.contextTime * 1000;
+          }
+        } catch { /* fall through to receipt-stamp fallback */ }
+        if (audioClockOffsetMsRef.current == null) {
+          // Fallback: anchor to receipt time. Less precise (adds main-thread
+          // scheduling jitter) but works if getOutputTimestamp is unavailable.
+          audioClockOffsetMsRef.current = performance.now() - msg.chunkWallEnd;
+        }
+      }
+      const off = audioClockOffsetMsRef.current;
+      decoder.feed(samples, sampleRateRef.current, msg.chunkWallStart + off, msg.chunkWallEnd + off);
       const sc = sampleClockRef.current;
       sc.n += samples.length;
       const now = performance.now();

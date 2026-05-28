@@ -2,35 +2,38 @@
 // in order to the main thread for biphase decode. Unlike AnalyserNode
 // snapshots, no samples are dropped between reads.
 //
-// Each posted chunk carries TWO wall-clock timestamps (performance.now() in
-// AudioWorkletGlobalScope):
+// Each posted chunk carries TWO timestamps in the AudioContext's audio-clock
+// domain (currentTime, in milliseconds since context start):
 //   chunkWallStart  — captured at the start of the first process() call that
 //                     contributed samples to the chunk
 //   chunkWallEnd    — captured just before the chunk is posted
 //
-// Decoder consumers linearly interpolate frame timestamps across [start, end]
-// using the sample-position within the chunk. This recovers true wall-clock
-// arrival time independent of the ADC's sample-clock drift: the ADC's clock
-// determines how *many* samples are in the chunk, but the wall-clock span
-// (end - start) is measured against the host quartz directly. Frame-rate
-// classification (integer vs 1.001-divided NTSC) then uses wall-clock-domain
-// timing, immune to the ±tens-of-ppm ADC bias that contaminates sample-count
-// based measurement.
+// We deliberately do NOT use performance.now() here. AudioWorkletGlobalScope
+// has historically inconsistent support for it — and even when present, its
+// time origin does not match the Window's, so values are unusable for
+// comparison against main-thread performance.now() (e.g. the analyzer's
+// `fresh = performance.now() - lf.t < 200` lock check). The main thread is
+// responsible for translating these audio-clock stamps into its own
+// performance.now() domain via AudioContext.getOutputTimestamp() — see the
+// onmessage handler in App.jsx (wireSourceToDecoder).
 //
-// `performance.now()` is required in AudioWorkletGlobalScope (Chrome 76+,
-// Firefox 76+, Safari 14.5+). If absent, we fall back to currentTime*1000,
-// which is in audio-clock domain (sample-clock-driven) and so reintroduces
-// the ADC bias — consumers can detect this via the `clockDomain` field.
+// Audio-clock timing is driven by the ADC's sample clock, so wall-clock-rate
+// classification (integer vs 1.001-divided NTSC) would normally be biased by
+// the ADC's ±tens-of-ppm error. The main-thread translation removes that:
+// getOutputTimestamp() returns paired (contextTime, performanceTime) measured
+// against the host quartz, so chunk *deltas* end up in main-thread domain and
+// the LSQ classifier reads against the host quartz, not the ADC clock.
 //
 // Message envelopes:
 //   { type: "samples", samples, chunkWallStart, chunkWallEnd, clockDomain }
 //   { type: "glitch",  gapMs }
+// `clockDomain` is always "audioclock" now; the field is kept for backwards
+// compatibility with any inspector code.
 // Glitch events are posted when the inter-process() gap exceeds ~2.5× the
 // quantum period, indicating the audio thread was starved.
 
-const HAS_PERF = typeof performance !== "undefined" && typeof performance.now === "function";
-const wallNow = HAS_PERF ? () => performance.now() : () => currentTime * 1000;
-const CLOCK_DOMAIN = HAS_PERF ? "wallclock" : "audioclock";
+const wallNow = () => currentTime * 1000;
+const CLOCK_DOMAIN = "audioclock";
 
 class LtcCapture extends AudioWorkletProcessor {
   constructor() {
