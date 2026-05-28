@@ -80,9 +80,19 @@ export class CadenceDetector {
     // [dropPerMin, dropPerMin+2] so the two windows don't overlap. The DF
     // classification needs to know the cadence (drop=2 for 30, 4 for 60),
     // so we defer until cadenceFps() returns a value.
+    //
+    // A true ss=59→ss=0 crossing must also advance the minute (or wrap the
+    // hour). A looping playback source (e.g. a 1-minute file that wraps back
+    // to its own start TC) produces a pseudo-crossing where mm/hh stay
+    // constant — that's a rewind, not a minute boundary, and counting it
+    // as one biases the DF inference toward NDF since the loop start almost
+    // always lands on ff=0.
+    const minuteAdvanced = this._prevFrame
+      && (frame.mm !== this._prevFrame.mm || frame.hh !== this._prevFrame.hh);
     if (this._prevFrame
         && frame.ss === 0
         && this._prevFrame.ss === 59
+        && minuteAdvanced
         && frame.mm % 10 !== 0) {
       const cadence = this.cadenceFps();
       if (cadence != null) {
