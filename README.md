@@ -164,33 +164,7 @@ totalFrames = (nomFps × 3600 × HH) + (nomFps × 60 × MM) + (nomFps × SS) + F
 
 Linear Timecode is encoded as a **biphase mark** (bi-phase mark coding, or BMC) audio signal. Each LTC frame consists of **80 bits** carrying timecode digits, user bits, status flags, and a sync word.
 
-The 80-bit LTC frame layout is:
-
-| Bits | Field |
-|---|---|
-| 0–3 | Frame units (BCD) |
-| 4–7 | User bits group 1 |
-| 8–9 | Frame tens (BCD) |
-| 10 | Drop frame flag |
-| 11 | Color frame flag |
-| 12–15 | User bits group 2 |
-| 16–19 | Seconds units (BCD) |
-| 20–23 | User bits group 3 |
-| 24–26 | Seconds tens (BCD) |
-| 27 | Biphase mark phase correction bit |
-| 28–31 | User bits group 4 |
-| 32–35 | Minutes units (BCD) |
-| 36–39 | User bits group 5 |
-| 40–42 | Minutes tens (BCD) |
-| 43 | Binary group flag BGF0 |
-| 44–47 | User bits group 6 |
-| 48–51 | Hours units (BCD) |
-| 52–55 | User bits group 7 |
-| 56–57 | Hours tens (BCD) |
-| 58 | Binary group flag BGF1 — **or** frame-tens MSB in the HFR variant (see below) |
-| 59 | Binary group flag BGF2 |
-| 60–63 | User bits group 8 |
-| 64–79 | Sync word: `0011111111111101` |
+At a high level, the 80 bits carry HH/MM/SS/FF as BCD digits, a drop-frame flag, a color-frame flag, three binary-group flags, eight 4-bit user-bit groups interleaved between the timecode digits, and a 16-bit sync word at the end of the frame. The bit-exact field layout is defined by the standard — see the ST 12-1 document, or any of the widely-available secondary descriptions (e.g. the Wikipedia "Linear timecode" article), for the per-bit field assignments. The actual bit positions consumed by this analyzer are visible in `parseFrame` in `smpte-analyzer/src/ltcDecoder.js`.
 
 **High-frame-rate (HFR) handling.** The standard 2-bit frame-tens field only encodes FF values 0–39, which is enough for cadences up to 30. For 50/60-fps cadences, this analyzer reads bit 58 as a third frame-tens bit so FF can reach 79 — a "wide LTC" convention used by several sound-recorder vendors. Caveats to be aware of:
 

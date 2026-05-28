@@ -42,11 +42,12 @@ const SMPTE_RATES = {
   "60":     { fps: 60,           dropFrame: false, label: "60 ND" },
 };
 
-// SMPTE ST 12-1 Level recommendations (dBFS for digital, dBu for analog)
+// Operating-level thresholds the analyzer uses to classify the input
+// (digital, dBFS). The nominal value reflects common LTC practice.
 const LEVEL_SPEC = {
   CLIP_THRESHOLD: -1,     // dBFS — above this = overload risk
   HOT_THRESHOLD: -6,      // dBFS — above this = hot, may cause read errors
-  NOMINAL: -18,           // dBFS — SMPTE nominal level
+  NOMINAL: -18,           // dBFS — common nominal operating level for LTC
   LOW_THRESHOLD: -30,     // dBFS — below this = may fail to lock
   SILENT_THRESHOLD: -60,  // dBFS — below this = dropout / no signal
 };
@@ -473,19 +474,19 @@ function SpecRefPanel() {
       color:"#666",
       lineHeight:1.6,
     }}>
-      <div style={{ color:"#ff9900", letterSpacing:2, fontSize:13, marginBottom:8 }}>SMPTE SPEC REFERENCE</div>
-      <div>ST 12-1:2014 — Linear Timecode (LTC)</div>
-      <div style={{ marginTop:6, color:"#333" }}>LEVEL THRESHOLDS (digital):</div>
+      <div style={{ color:"#ff9900", letterSpacing:2, fontSize:13, marginBottom:8 }}>ANALYZER REFERENCE</div>
+      <div>LTC analyzer — see ST 12-1 for the underlying standard</div>
+      <div style={{ marginTop:6, color:"#333" }}>ANALYZER LEVEL THRESHOLDS (digital):</div>
       <div>Nominal ........... {LEVEL_SPEC.NOMINAL} dBFS</div>
       <div>Hot (error risk) .. {LEVEL_SPEC.HOT_THRESHOLD} dBFS</div>
       <div>Clip threshold .... {LEVEL_SPEC.CLIP_THRESHOLD} dBFS</div>
       <div>Min readable ...... {LEVEL_SPEC.LOW_THRESHOLD} dBFS</div>
       <div>Dropout ........... {LEVEL_SPEC.SILENT_THRESHOLD} dBFS</div>
-      <div style={{ marginTop:6, color:"#333" }}>LTC FRAME STRUCTURE:</div>
+      <div style={{ marginTop:6, color:"#333" }}>LTC FRAME (summary):</div>
       <div>80 bits/frame, biphase mark</div>
-      <div>Sync word bits 64–79: 0011111111111101</div>
-      <div>Drop frame: skip fr 0,1 at min start</div>
-      <div>Except every 10th minute</div>
+      <div>16-bit sync word at end of frame</div>
+      <div>Drop frame: skip 2 frames each minute</div>
+      <div>except every 10th minute</div>
       <div style={{ marginTop:12, color:"#ff9900", letterSpacing:2, fontSize:13 }}>SNR (dB)</div>
       <div style={para}>
         Band-limited signal-to-noise ratio: total power in the LTC fundamentals
@@ -1943,7 +1944,7 @@ export default function SMPTEAnalyzer() {
             textShadow:"0 0 20px rgba(0,255,136,0.3)",
           }}>SMPTE TIMECODE ANALYZER</div>
           <div style={{ fontSize:11, color:"#333", letterSpacing:3, marginTop:2 }}>
-            ST 12-1:2014 COMPLIANT · LTC
+            LTC ANALYZER · IMPLEMENTS ST 12-1
           </div>
         </div>
         <div style={{ textAlign:"right" }}>
