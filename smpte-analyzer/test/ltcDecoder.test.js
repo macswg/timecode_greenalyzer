@@ -11,7 +11,7 @@ import { tcToFrameNumber, framesToTc, dropPerMin, isValidDropFrame } from "../sr
 // ---------------------------------------------------------------------------
 // LTC frame & biphase-mark synthesis helpers.
 //
-// SMPTE ST 12-1 Table 2 bit layout (LSB-first within each field):
+// 80-bit LTC frame bit layout (LSB-first within each field):
 //   0-3   frame units (BCD)
 //   8-9   frame tens (BCD)
 //   10    drop-frame flag

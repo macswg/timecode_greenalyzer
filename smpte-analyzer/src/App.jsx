@@ -378,7 +378,7 @@ function Gauge({ label, value, min=0, max=100, unit="", thresholds=[] }) {
 }
 
 // Real bit-integrity map: renders the 80 bits of the most recently decoded
-// LTC frame (per SMPTE ST 12-1 Table 2). Bits 64-79 are the fixed sync word
+// LTC frame. Bits 64-79 are the fixed sync word
 // — they're rendered in a distinct colour. Bits 0-63 are user/timecode data.
 // When no frame has been decoded the cells are dim.
 function BitStreamView({ bits, bitErrors, locked }) {
@@ -609,7 +609,7 @@ function SpecRefPanel() {
       <div style={{ marginTop:12, color:"#ff9900", letterSpacing:2, fontSize:13 }}>CONTINUITY</div>
       <div style={para}>
         Consecutive in-order LTC frames must differ by exactly one frame
-        (with drop-frame rules applied at minute boundaries per ST 12-1 §7).
+        (with drop-frame rules applied at minute boundaries).
         Anything else is a continuity break:
         <br/><span style={{color:"#777"}}>REPEAT</span> — same frame
         decoded twice (delta = 0). Typically from a freeze-frame in source
@@ -985,8 +985,8 @@ export default function SMPTEAnalyzer() {
       // ADC plus the derived capture-clock error are for the audit panel.
       data.driftPpmSourceVsAdc = dec?.driftPpmSourceVsAdc() ?? null;
       data.captureClockErrorPpm = dec?.captureClockErrorPpm() ?? null;
-      // ST 12-1:2014 §12 field-mark bit toggle pattern at 50/60. TOGGLING ⇒
-      // spec-conformant frame-pair LTC; STATIC ⇒ de-facto wide LTC. Null
+      // Field-mark bit toggle pattern at 50/60. TOGGLING ⇒ frame-pair LTC;
+      // STATIC ⇒ de-facto wide LTC. Null
       // outside 50/60 or while still gathering samples. See #34, #37.
       data.fieldMarkBehavior = dec?.fieldMarkBehavior?.() ?? null;
       data.framesDecoded = dec?.framesDecoded ?? 0;
@@ -1282,8 +1282,8 @@ export default function SMPTEAnalyzer() {
         fieldMarkBehavior: data.fieldMarkBehavior ?? null,
         bgf: data.bgf ?? null,
         // User bits as 8-char hex string in transmission order (UB1..UB8).
-        // Null when no live frame. Per ST 12-1:2014 §8.4; semantic decoding
-        // (ST 309 date/time, etc.) is a downstream concern — wire the raw bits.
+        // Null when no live frame. Semantic decoding (date/time, etc.) is a
+        // downstream concern — wire the raw bits.
         userBits: data.userBits
           ? Array.from(data.userBits, n => n.toString(16).toUpperCase()).join("")
           : null,
@@ -2554,13 +2554,13 @@ export default function SMPTEAnalyzer() {
                             ? analysis.bgf.map(b => b == null ? "—" : (b ? "1" : "0")).join(" ")
                             : "—"}
                         </span>
-                        <span style={{ color:"#555", letterSpacing:1 }}>§12 FIELD-MARK</span>
+                        <span style={{ color:"#555", letterSpacing:1 }}>FIELD-MARK</span>
                         <span style={{ color: analysis?.fieldMarkBehavior == null ? "#666"
                                                 : analysis.fieldMarkBehavior === "TOGGLING" ? "#00ff88" : "#ffaa00" }}>
                           {analysis?.fieldMarkBehavior == null
                             ? "—"
                             : analysis.fieldMarkBehavior === "TOGGLING"
-                              ? "TOGGLING · frame-pair LTC (spec §12)"
+                              ? "TOGGLING · frame-pair LTC"
                               : "STATIC · wide LTC (de-facto)"}
                         </span>
                         <span style={{ color:"#555", letterSpacing:1 }}>perf.now() RES</span>

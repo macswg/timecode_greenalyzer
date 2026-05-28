@@ -1,4 +1,4 @@
-// Drop-frame (and frame-count ↔ HH:MM:SS:FF) math, SMPTE ST 12-1 §7.
+// Drop-frame (and frame-count ↔ HH:MM:SS:FF) math.
 //
 // Single source of truth for the DF skip rule:
 //   29.97 DF → 30 fps nominal → skip 2 frames per non-tenth minute

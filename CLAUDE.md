@@ -111,7 +111,7 @@ The same rule is applied in `ltcDecoder.js`'s `parseFrame`. Any change to drop-f
 
 ### LTC frame layout
 
-The 80-bit frame structure (BCD digits, flags, user bits, sync word `0011111111111101` at bits 64–79) is defined by SMPTE ST 12-1 Table 2. It is implemented in `parseFrame` in `ltcDecoder.js`. The simulation path in `App.jsx` does not decode frames — it generates timecode values directly via `framesToTc`. The README's "LTC Frame Structure" table is the reference if bit-field code needs to change.
+The 80-bit LTC frame structure (BCD digits, flags, user bits, sync word `0011111111111101` at bits 64–79) is implemented in `parseFrame` in `ltcDecoder.js`. The simulation path in `App.jsx` does not decode frames — it generates timecode values directly via `framesToTc`. The README's "LTC Frame Structure" table is the reference if bit-field code needs to change.
 
 ### API publisher
 

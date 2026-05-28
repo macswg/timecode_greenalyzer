@@ -257,27 +257,20 @@ export function parseFrame(b, nominalFps, start = 0) {
   // used by many sound recorders / slates (Tentacle, Ambient, some Sound
   // Devices firmwares).
   //
-  // NOTE — this DEVIATES from SMPTE ST 12-1:2014 §12 / Table 11, which
-  // mandates a different scheme at 48/50/60 fps: the LTC count increments
-  // every *other* frame (FF wraps at 24 or 29) and the per-field LSB is
-  // carried in a field-mark flag at the polarity-correction position
-  // (bit 27 at 60-frame, bit 59 at 50-frame). In the §12 scheme bit 58 is
-  // BGF1, NOT a frame-tens extension. See issue #34. The earlier in-code
-  // citation of "§6.6 (HFR)" was incorrect — §6 is the 25/50 section and
-  // §12 does not authorize bit-58 reuse.
+  // NOTE — this is a de facto convention, not the standard scheme for
+  // 48/50/60 fps. The standard uses a frame-pair count (FF wraps at 24 or
+  // 29) plus a field-mark flag. See issue #34.
   //
   // We only consult bit 58 when the candidate rate is 50/60 — otherwise a
-  // spec-conformant ≤30 fps generator that sets BGF1=1 (binary group data
-  // present) would be miscoded as FF+40.
+  // generator that sets bit 58 for binary-group purposes at ≤30 fps would
+  // be miscoded as FF+40.
   const useHfrTens = nominalFps != null && nominalFps >= 50;
   const frTens   = b[o+8] | (b[o+9]<<1) | (useHfrTens ? (b[o+58]<<2) : 0);
-  // Drop-frame flag (bit 10) is meaningful only at 30-frame counting (and by
-  // extension 60-frame). Per ST 12-1:2014 Table 3 footnote, at 25-frame the
-  // bit is required to be zero at the source and ignored by receivers — and
-  // it has no meaning at 24-frame either. Color-frame flag (bit 11) is
-  // unused at 24-frame. Suppress both outside their valid cadences so a
-  // malformed source can't propagate a spurious flag into downstream
-  // consumers (publisher payloads, UI, cadence detector).
+  // Drop-frame flag (bit 10) is meaningful only at 30/60-frame counting;
+  // color-frame flag (bit 11) is unused at 24-frame. Suppress both outside
+  // their valid cadences so a malformed source can't propagate a spurious
+  // flag into downstream consumers (publisher payloads, UI, cadence
+  // detector).
   const dfBitValid = nominalFps === 30 || nominalFps === 60;
   const cfBitValid = nominalFps === 25 || nominalFps === 30 ||
                      nominalFps === 50 || nominalFps === 60;
@@ -289,9 +282,9 @@ export function parseFrame(b, nominalFps, start = 0) {
   const minTens  = b[o+40] | (b[o+41]<<1) | (b[o+42]<<2);
   const hrUnits  = b[o+48] | (b[o+49]<<1) | (b[o+50]<<2) | (b[o+51]<<3);
   const hrTens   = b[o+56] | (b[o+57]<<1);
-  // Per-nibble BCD validity (ST 12-1:2014 §5.2 / §8.2): each units field is
-  // a BCD digit 0–9; tens fields are constrained by their bit-width and
-  // valid value range. Catches single-bit flips that would otherwise produce
+  // Per-nibble BCD validity: each units field is a BCD digit 0–9; tens
+  // fields are constrained by their bit-width and valid value range.
+  // Catches single-bit flips that would otherwise produce
   // a value that passes the final bounds check (e.g. secUnits=0b1010 with
   // secTens=0 → ss=10 looks legal but is invalid BCD).
   if (frUnits > 9 || secUnits > 9 || minUnits > 9 || hrUnits > 9) return null;
@@ -301,27 +294,20 @@ export function parseFrame(b, nominalFps, start = 0) {
   const mm = minTens * 10 + minUnits;
   const hh = hrTens * 10 + hrUnits;
   if (ff > 79 || ss > 59 || mm > 59 || hh > 23) return null;
-  // Field-mark flag (ST 12-1:2014 §12 / Table 11): at 60-frame LTC the
-  // per-field LSB-of-pair lives at bit 27; at 50-frame it lives at bit 59.
-  // (At ≤30 fps these positions carry the polarity-correction bit, which
-  // has different semantics — see #40.) A spec-conformant §12 source will
+  // Field-mark flag at 50/60 fps. A spec-conformant frame-pair source will
   // toggle this bit every frame; a wide-LTC source (#34) will leave it
   // static. MultiRateDecoder.fieldMarkBehavior() derives the source's
-  // labelling convention from the toggle pattern.
+  // labelling convention from the toggle pattern. See #40 for the bit-27/59
+  // dual semantics at lower cadences.
   let fieldMark = null;
   if (nominalFps === 60) fieldMark = b[o+27] === 1;
   else if (nominalFps === 50) fieldMark = b[o+59] === 1;
-  // Binary-group flag bits (ST 12-1:2014 Table 3, with Table 11 parallels for
-  // 50/60). Positions are RATE-DEPENDENT:
-  //   24/30-frame:  BGF0=43, BGF1=58, BGF2=59
-  //   25-frame:     BGF0=27, BGF1=58, BGF2=43
-  //   60-frame:     BGF0=43, BGF1=58, BGF2=59  (bit 27 = field-mark, see above)
-  //   50-frame:     BGF0=27, BGF1=58, BGF2=43  (bit 59 = field-mark, see above)
-  // The combination of (BGF0, BGF1, BGF2) identifies the user-bit encoding
-  // (§8.4–§8.5, e.g. ST 309 date/timezone). At 50/60 fps under our wide-LTC
-  // deviation (#34) bit 58 is repurposed as the frame-tens MSB, so BGF1 is
-  // reported as null at those cadences — when FF<40 it would coincidentally
-  // read 0, but we cannot disambiguate "BGF1=0" from "frame-tens MSB=0".
+  // Binary-group flag bits (BGF0/1/2). Positions are rate-dependent; the
+  // combination identifies the user-bit encoding (e.g. ST 309 date/timezone).
+  // At 50/60 fps under our wide-LTC deviation (#34) bit 58 is repurposed as
+  // the frame-tens MSB, so BGF1 is reported as null at those cadences — when
+  // FF<40 it would coincidentally read 0, but we cannot disambiguate
+  // "BGF1=0" from "frame-tens MSB=0".
   let bgf0 = null, bgf1 = null, bgf2 = null;
   if (nominalFps === 25 || nominalFps === 50) {
     bgf0 = b[o+27] === 1;
@@ -332,14 +318,10 @@ export function parseFrame(b, nominalFps, start = 0) {
     bgf2 = b[o+59] === 1;
     if (nominalFps === 24 || nominalFps === 30) bgf1 = b[o+58] === 1;
   }
-  // User bits (ST 12-1:2014 §8.4): eight 4-bit groups, each read LSB-first
-  // within the group. Group positions:
-  //   UB1 = 4–7   UB2 = 12–15  UB3 = 20–23  UB4 = 28–31
-  //   UB5 = 36–39 UB6 = 44–47  UB7 = 52–55  UB8 = 60–63
-  // Returned in transmission order (UB1 first). The semantic interpretation
-  // (raw / BCD time-of-day per ST 309 / page-line per IEC 60461 / character-
-  // set per ST 262M) is selected by the BGF triplet — see bgf0/1/2 above.
-  // Downstream code decides how to render.
+  // User bits: eight 4-bit groups, each read LSB-first within the group,
+  // returned in transmission order (UB1 first). The semantic interpretation
+  // is selected by the BGF triplet — see bgf0/1/2 above. Downstream code
+  // decides how to render.
   const ub = new Uint8Array(8);
   const ubStarts = [4, 12, 20, 28, 36, 44, 52, 60];
   for (let g = 0; g < 8; g++) {
@@ -360,16 +342,13 @@ export function tcString(lf) {
 // the user. The carrier rate is one of two independent properties of an
 // LTC stream; the other is the counting cadence (how the FF field wraps),
 // which is observed separately by CadenceDetector from the decoded numbers.
-// SMPTE ST 12-1:2014 §1 enumerates nominal rates 60, 59.94, 50, 48, 47.95,
-// 30, 29.97, 25, 24, 23.98. **48 and 47.95 are intentionally absent from this
-// candidate set.** Under the spec's §12 frame-pair convention (Table 11) a
-// 48 fps progressive source emits LTC at a 24-cadence count with the per-
-// field LSB carried in a field-mark flag — i.e. spec-compliant 48p LTC is
-// already covered by the 24 candidate, and `fieldMarkBehavior()` (#37) will
-// report TOGGLING on such a source. A non-spec "wide LTC" 48 fps stream
-// (FF wrapping at 48 with bit 58 reused as a third frame-tens bit, analogous
-// to the wide 50/60 deviation tracked in #34) is the case this set does NOT
-// cover; if such sources need to be detected, add 48 here. See issue #41.
+// **48 and 47.95 fps are intentionally absent from this candidate set.** A
+// spec-compliant 48p source emits LTC at a 24-cadence count with the
+// per-field LSB carried in a field-mark flag — already covered by the 24
+// candidate; `fieldMarkBehavior()` (#37) will report TOGGLING on such a
+// source. A non-spec "wide LTC" 48 fps stream (analogous to the 50/60
+// deviation in #34) is the case this set does NOT cover; if such sources
+// need to be detected, add 48 here. See issue #41.
 const CANDIDATE_FPS = [24, 25, 30, 50, 60];
 
 export class MultiRateDecoder {
@@ -425,11 +404,10 @@ export class MultiRateDecoder {
     // RATE_CHANGE). Same pattern as cadenceDetector.lastBreak: App.jsx
     // watches .t for change and writes a session-log entry.
     this._lastEvent = null;
-    // Field-mark history (ST 12-1:2014 §12). When the winner is the 50 or 60
-    // fps decoder, each decoded frame's parseFrame extracts a fieldMark bit
-    // (bit 27 at 60-frame, bit 59 at 50-frame). A §12-conformant source
-    // toggles it every frame; a wide-LTC source (#34) leaves it static.
-    // fieldMarkBehavior() classifies the recent toggle pattern.
+    // Field-mark history. When the winner is the 50 or 60 fps decoder, each
+    // decoded frame's parseFrame extracts a fieldMark bit. A frame-pair
+    // source toggles it every frame; a wide-LTC source (#34) leaves it
+    // static. fieldMarkBehavior() classifies the recent toggle pattern.
     this._recentFieldMarks = [];            // { t, v }
   }
 
@@ -1038,10 +1016,10 @@ export class MultiRateDecoder {
   // Fires on MEASURING_COMMIT, RATE_CHANGE, and DIVERGENCE transitions.
   get lastCarrierEvent() { return this._lastEvent; }
 
-  // ST 12-1:2014 §12 field-mark inference at 50/60 fps. Returns one of:
+  // Field-mark inference at 50/60 fps. Returns one of:
   //   "TOGGLING"   — flag toggles ≥80% of consecutive samples ⇒ source is
-  //                  spec-conformant frame-pair LTC (FF labels frame pairs,
-  //                  flag carries per-field LSB).
+  //                  frame-pair LTC (FF labels frame pairs, flag carries
+  //                  per-field LSB).
   //   "STATIC"     — flag toggles ≤20% of consecutive samples ⇒ source is
   //                  de-facto wide LTC (FF labels every frame directly).
   //   null         — winner is not 50/60, insufficient samples (<10), or

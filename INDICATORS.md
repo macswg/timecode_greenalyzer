@@ -76,7 +76,7 @@ hide; they show their dim state so the layout stays stable.
 | **THD** gauge | `computeLtcSpectralMetrics()` — `√(P3+P5+P7)/√(P1)×100` for 3rd/5th/7th odd harmonics of `bitRate/2` fundamental. | In %. **Computed only when locked.** `—` otherwise. EMA-smoothed. LTC ideal ≈38%; above that indicates added distortion. Gauge thresholds: ≤50% green, 50–70% orange, >70% red. |
 | **NOISE FLOOR** readout | `10·log₁₀(median null-bin linear power)` — median of bins at biphase spectral nulls `(h+0.5)×f1` | In dB. **Computed only when locked.** `—` otherwise. EMA-smoothed. |
 
-Threshold colors (from `LEVEL_SPEC` in `App.jsx`, per SMPTE ST 12-1 §6):
+Threshold colors (from `LEVEL_SPEC` in `App.jsx`):
 clip ≥ −1 dBFS · hot ≥ −6 · nominal −18 · low < −30 · dropout < −60.
 
 ---
@@ -118,7 +118,7 @@ In sim mode the picked rate's bar shows scaled by the sim's confidence proxy.
 ### LAST FRAME · 80 BITS
 
 Renders the most recent successfully decoded LTC frame as a 20×4 grid of
-cells per SMPTE ST 12-1 Table 2:
+cells of the 80-bit LTC frame:
 
 - **Bits 0–63** — user / timecode payload bits. Green-filled = 1, dim = 0.
 - **Bits 64–79** — the fixed 16-bit sync word `0011111111111101`. Cyan-filled

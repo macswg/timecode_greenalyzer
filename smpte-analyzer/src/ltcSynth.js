@@ -15,8 +15,8 @@ function writeLsbFirst(bits, start, value, nBits) {
   for (let i = 0; i < nBits; i++) bits[start + i] = (value >> i) & 1;
 }
 
-// 80-bit LTC frame layout per SMPTE ST 12-1 Table 2. Mirrors parseFrame() in
-// ltcDecoder.js. User bits are all zero — we're generating timecode only.
+// 80-bit LTC frame layout. Mirrors parseFrame() in ltcDecoder.js. User bits
+// are all zero — we're generating timecode only.
 //
 // Frame tens normally uses bits 8, 9 (max FF=39). At 50/60 cadence we extend
 // to 3 bits with bit 58 as MSB (wide-LTC convention, see #34 / parseFrame).
@@ -24,13 +24,12 @@ function writeLsbFirst(bits, start, value, nBits) {
 // as a frame-tens MSB even when FF<40 is harmless arithmetically but wrong
 // semantically and would corrupt BGF1 if a future revision sets it.
 //
-// Polarity-correction bit (§9.2.3): bit 27 at 24/30 cadence, bit 59 at 25
-// cadence. Chosen so the zero-bit count across bits 0–63 (everything except
-// the sync word) is even, which holds sync-word polarity steady from one
-// frame to the next. Not defined for the wide-LTC 50/60 deviation — the
-// canonical §12 scheme uses those positions for the field-mark flag
-// instead, and our wide-LTC synth has no field-mark, so we leave the bit
-// at 0 at 50/60.
+// Polarity-correction bit: bit 27 at 24/30 cadence, bit 59 at 25 cadence.
+// Chosen so the zero-bit count across bits 0–63 (everything except the sync
+// word) is even, which holds sync-word polarity steady from one frame to the
+// next. Not defined for the wide-LTC 50/60 deviation — those positions are
+// used for the field-mark flag in frame-pair LTC, and our wide-LTC synth
+// has no field-mark, so we leave the bit at 0 at 50/60.
 export function encodeFrameBits(hh, mm, ss, ff, dropFrame, cadenceFps = 30) {
   const bits = new Uint8Array(80);
   const frTens = Math.floor(ff / 10);
