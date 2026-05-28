@@ -143,7 +143,7 @@ The analyzer treats **carrier rate** (how fast frames physically arrive: integer
 
 Drop-frame timecode compensates for the difference between 30 fps nominal and 29.97002997... fps actual (30000/1001) — and equivalently between 60 and 59.94 fps. Without compensation, timecode would drift from wall-clock time by approximately 3.6 seconds per hour at 29.97.
 
-The drop-frame rule per **SMPTE ST 12-1 §7**:
+The drop-frame rule:
 
 - At the start of each minute (`SS=00`), frames `00` and `01` are skipped (not recorded or displayed)
 - **Exception:** frames are not skipped at every 10th minute (`MM=00, 10, 20, 30, 40, 50`)
@@ -164,7 +164,7 @@ totalFrames = (nomFps × 3600 × HH) + (nomFps × 60 × MM) + (nomFps × SS) + F
 
 Linear Timecode is encoded as a **biphase mark** (bi-phase mark coding, or BMC) audio signal. Each LTC frame consists of **80 bits** carrying timecode digits, user bits, status flags, and a sync word.
 
-Per **SMPTE ST 12-1 Table 2**, the 80-bit frame layout is:
+The 80-bit LTC frame layout is:
 
 | Bits | Field |
 |---|---|
@@ -192,12 +192,10 @@ Per **SMPTE ST 12-1 Table 2**, the 80-bit frame layout is:
 | 60–63 | User bits group 8 |
 | 64–79 | Sync word: `0011111111111101` |
 
-**High-frame-rate (HFR) variant.** The standard 2-bit frame-tens field only encodes FF values 0–39, which is enough for cadences up to 30. SMPTE ST 12-1:2014 §6.6 defines an HFR variant for 50/60-fps systems that repurposes bit 58 (formerly BGF1) as a third frame-tens bit, expanding the field to 3 bits so FF can reach 79.
+**High-frame-rate (HFR) handling.** The standard 2-bit frame-tens field only encodes FF values 0–39, which is enough for cadences up to 30. For 50/60-fps cadences, this analyzer reads bit 58 as a third frame-tens bit so FF can reach 79 — a "wide LTC" convention used by several sound-recorder vendors. Caveats to be aware of:
 
-This analyzer always reads bit 58 as part of frame tens, in every decoded frame, regardless of detected rate. Caveats to be aware of:
-
-- A strictly-spec-conformant generator at a ≤30 cadence that uses binary group flags will mis-decode FF whenever BGF1 happens to be set. The analyzer does not surface binary group flag data anywhere, so the practical impact is limited, but it's a real departure from the standard variant.
-- Real-world HFR generators are not unanimous about which bit becomes the extra frame-tens MSB. Some vendors use bit 35 or bit 59 instead of bit 58. We follow ST 12-1:2014 (bit 58). A generator that uses a different bit will mis-decode at FF≥40; that's a per-vendor compatibility issue, not an analyzer bug.
+- This is a de facto convention, not the only one. Real-world HFR generators are not unanimous about which bit becomes the extra frame-tens MSB; some vendors use bit 35 or bit 59 instead. A generator that uses a different bit will mis-decode at FF≥40 against this analyzer.
+- A generator that uses bit 58 for binary group flags at a ≤30 cadence will mis-decode FF whenever that bit is set. The analyzer does not surface binary group flag data anywhere, so the practical impact is limited.
 
 **Sync word** (bits 64–79): `0011111111111101`  
 This 16-bit pattern is unique — it cannot occur in valid BCD timecode data or in the biphase encoding of any other legal bit sequence, which allows the decoder to frame-align reliably.
@@ -282,7 +280,7 @@ In live mode the CLIP/HOT/LOW/DROPOUT tags come exclusively from real level meas
 
 ### Frame Integrity Map
 
-A 20-column grid of 80 cells visualizes the bits of the most recently decoded LTC frame, per SMPTE ST 12-1 Table 2. Data bits (0–63) render in green; the sync word (bits 64–79) renders in cyan. Bit 10 (the DF flag) is marked with a `D` glyph so its state is readable at a glance. The cumulative bit-error count is shown below the grid.
+A 20-column grid of 80 cells visualizes the bits of the most recently decoded LTC frame. Data bits (0–63) render in green; the sync word (bits 64–79) renders in cyan. Bit 10 (the DF flag) is marked with a `D` glyph so its state is readable at a glance. The cumulative bit-error count is shown below the grid.
 
 ---
 
@@ -361,4 +359,4 @@ Released under the [MIT License](LICENSE) © 2026 Sean Green. You are free to us
 | 1.1 | 2026-05-12 | Live biphase decode wired (MultiRateDecoder + AudioWorklet); auto rate detection; device picker; API publisher; session log; Web Worker tick |
 | 1.2 | 2026-05-12 | File-drop analysis path; `wireSourceToDecoder()` shared between mic and file paths; WAV native rate display; real SNR/THD/noise-floor via `computeLtcSpectralMetrics()`; EMA smoothing on gauges; clock drift/chase indicator; fractional rate detection (29.97 NDF / 23.976 / 59.94 NDF); frame-span sanity check; biphase tolerance tightened ±25% → ±15%; rate label color-coded (DF orange / NDF blue); B612 Mono timecode font; mobile responsive CSS; NOISE error tag removed from live mode |
 | 1.3 | 2026-05-12 | Continuity detection (REPEAT / JUMP / REWIND break types, per-frame queue drain, 500 ms gap reset); dropout rate (2-second rolling window, CLEAN / OCCASIONAL / FREQUENT / SEVERE); drift uses mean of recentFrameSpans (not median) for sub-sample precision; recentFrameSpans cap raised 30 → 120 frames; lock indicator and LOCKED banner changed from cyan to green (`#00ff88`); 47.95 and 48 fps removed from SMPTE_RATES; ST 12-2 references removed; app header updated to `ST 12-1:2014 COMPLIANT · LTC`; file status label changed to `ANALYSIS ONLY · NO OUTPUT`; `{type:"continuity"}` API publisher message |
-| 1.4 | 2026-05-25 | Carrier rate and counting cadence split into independent observations (`CadenceDetector` in its own module); measurement-grade wall-clock LSQ carrier classifier (worklet stamps `performance.now()` at chunk boundaries; LSQ regression over 20 s stable + 3 s detector windows; 5σ + 3-agreements commit and divergence rules; MEASURING state in UI); HFR frame layout support (FF up to 79 via bit 58 repurpose per ST 12-1:2014 §6.6); `carrierCadenceMismatch()` raises high-confidence NON-CONFORMANT warning for off-spec sources (e.g. integer-30 carrier with DF count); AUDIT panel exposes raw measurement numbers; two drift readouts (source → host quartz primary, source → ADC diagnostic, CAPTURE CLOCK ERROR cross-check); LOCK_ACQUIRED log entries (5 s sustained requirement); file analysis uses deterministic software-paced decoder feeder; session log SRC column distinguishes `file` from `live`; session log timestamps in 24-hour; FRAME INTEGRITY grid marks DF flag (bit 10) with a `D` glyph; SMPTE SPEC REFERENCE panel documents every reported quantity; `ltcSynth.js` with independent carrier and cadence knobs; Vitest unit-test suite (55 tests) covering the new classifier. Closes #1 (30 DF detection) and #29 (measurement-grade carrier classification) |
+| 1.4 | 2026-05-25 | Carrier rate and counting cadence split into independent observations (`CadenceDetector` in its own module); measurement-grade wall-clock LSQ carrier classifier (worklet stamps `performance.now()` at chunk boundaries; LSQ regression over 20 s stable + 3 s detector windows; 5σ + 3-agreements commit and divergence rules; MEASURING state in UI); HFR frame layout support (FF up to 79 via bit 58 as frame-tens MSB, wide-LTC convention); `carrierCadenceMismatch()` raises high-confidence NON-CONFORMANT warning for off-spec sources (e.g. integer-30 carrier with DF count); AUDIT panel exposes raw measurement numbers; two drift readouts (source → host quartz primary, source → ADC diagnostic, CAPTURE CLOCK ERROR cross-check); LOCK_ACQUIRED log entries (5 s sustained requirement); file analysis uses deterministic software-paced decoder feeder; session log SRC column distinguishes `file` from `live`; session log timestamps in 24-hour; FRAME INTEGRITY grid marks DF flag (bit 10) with a `D` glyph; SMPTE SPEC REFERENCE panel documents every reported quantity; `ltcSynth.js` with independent carrier and cadence knobs; Vitest unit-test suite (55 tests) covering the new classifier. Closes #1 (30 DF detection) and #29 (measurement-grade carrier classification) |
