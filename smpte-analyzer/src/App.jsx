@@ -955,11 +955,15 @@ export default function SMPTEAnalyzer() {
         data.hh = lf.hh; data.mm = lf.mm; data.ss = lf.ss; data.ff = lf.ff;
         data.dropFrame = lf.dropFrame;
         data.colorFrame = lf.colorFrame;
+        data.bgf = [lf.bgf0, lf.bgf1, lf.bgf2];
+        data.userBits = lf.userBits ?? null;
         data.frameValid = fresh;
       } else {
         data.hh = 0; data.mm = 0; data.ss = 0; data.ff = 0;
         data.dropFrame = false;
         data.colorFrame = false;
+        data.bgf = null;
+        data.userBits = null;
         data.frameValid = false;
       }
       data.ltcLocked = !!fresh;
@@ -981,6 +985,10 @@ export default function SMPTEAnalyzer() {
       // ADC plus the derived capture-clock error are for the audit panel.
       data.driftPpmSourceVsAdc = dec?.driftPpmSourceVsAdc() ?? null;
       data.captureClockErrorPpm = dec?.captureClockErrorPpm() ?? null;
+      // ST 12-1:2014 §12 field-mark bit toggle pattern at 50/60. TOGGLING ⇒
+      // spec-conformant frame-pair LTC; STATIC ⇒ de-facto wide LTC. Null
+      // outside 50/60 or while still gathering samples. See #34, #37.
+      data.fieldMarkBehavior = dec?.fieldMarkBehavior?.() ?? null;
       data.framesDecoded = dec?.framesDecoded ?? 0;
       data.bitErrors = dec?.bitErrors ?? 0;
       data.lastFrameBits = dec?.lastFrameBits ?? null;
@@ -1271,6 +1279,14 @@ export default function SMPTEAnalyzer() {
         cadenceFps: data.cadence?.fps ?? null,
         cadenceDropFrame: data.cadence?.dropFrame ?? null,
         carrierCadenceMismatch: data.carrierCadenceMismatch ?? null,
+        fieldMarkBehavior: data.fieldMarkBehavior ?? null,
+        bgf: data.bgf ?? null,
+        // User bits as 8-char hex string in transmission order (UB1..UB8).
+        // Null when no live frame. Per ST 12-1:2014 §8.4; semantic decoding
+        // (ST 309 date/time, etc.) is a downstream concern — wire the raw bits.
+        userBits: data.userBits
+          ? Array.from(data.userBits, n => n.toString(16).toUpperCase()).join("")
+          : null,
         source: srcLabel,
         ltcLocked: useRealAudio ? !!data.ltcLocked : true,
         frameValid: data.frameValid !== false,
@@ -2525,6 +2541,27 @@ export default function SMPTEAnalyzer() {
                         <span style={{ color:"#555", letterSpacing:1 }}>CAPTURE CLOCK ERROR</span>
                         <span style={{ color: Math.abs(cap ?? 0) > 100 ? "#ffaa00" : "#888" }}>
                           {fmt(cap)} ppm{Math.abs(cap ?? 0) > 100 ? " ⚠ check capture device" : ""}
+                        </span>
+                        <span style={{ color:"#555", letterSpacing:1 }}>USER BITS</span>
+                        <span style={{ color:"#ccc", fontFamily:"B612 Mono, monospace", letterSpacing:2 }}>
+                          {analysis?.userBits
+                            ? Array.from(analysis.userBits, n => n.toString(16).toUpperCase()).join(" ")
+                            : "—"}
+                        </span>
+                        <span style={{ color:"#555", letterSpacing:1 }}>BGF 0/1/2</span>
+                        <span style={{ color:"#888" }}>
+                          {analysis?.bgf
+                            ? analysis.bgf.map(b => b == null ? "—" : (b ? "1" : "0")).join(" ")
+                            : "—"}
+                        </span>
+                        <span style={{ color:"#555", letterSpacing:1 }}>§12 FIELD-MARK</span>
+                        <span style={{ color: analysis?.fieldMarkBehavior == null ? "#666"
+                                                : analysis.fieldMarkBehavior === "TOGGLING" ? "#00ff88" : "#ffaa00" }}>
+                          {analysis?.fieldMarkBehavior == null
+                            ? "—"
+                            : analysis.fieldMarkBehavior === "TOGGLING"
+                              ? "TOGGLING · frame-pair LTC (spec §12)"
+                              : "STATIC · wide LTC (de-facto)"}
                         </span>
                         <span style={{ color:"#555", letterSpacing:1 }}>perf.now() RES</span>
                         <span style={{ color:"#666" }}>

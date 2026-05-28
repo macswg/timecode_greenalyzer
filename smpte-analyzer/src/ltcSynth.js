@@ -17,11 +17,21 @@ function writeLsbFirst(bits, start, value, nBits) {
 
 // 80-bit LTC frame layout per SMPTE ST 12-1 Table 2. Mirrors parseFrame() in
 // ltcDecoder.js. User bits are all zero — we're generating timecode only.
-// Frame tens uses bits 8, 9 (standard) plus bit 58 (HFR variant) for the MSB,
-// allowing FF up to 79 — required at 50/60-fps cadences. parseFrame always
-// reads bit 58 as part of frame tens so this stays consistent across all
-// generated rates.
-export function encodeFrameBits(hh, mm, ss, ff, dropFrame) {
+//
+// Frame tens normally uses bits 8, 9 (max FF=39). At 50/60 cadence we extend
+// to 3 bits with bit 58 as MSB (wide-LTC convention, see #34 / parseFrame).
+// At 24/25/30 cadence bit 58 is BGF1 and must be left at zero — writing it
+// as a frame-tens MSB even when FF<40 is harmless arithmetically but wrong
+// semantically and would corrupt BGF1 if a future revision sets it.
+//
+// Polarity-correction bit (§9.2.3): bit 27 at 24/30 cadence, bit 59 at 25
+// cadence. Chosen so the zero-bit count across bits 0–63 (everything except
+// the sync word) is even, which holds sync-word polarity steady from one
+// frame to the next. Not defined for the wide-LTC 50/60 deviation — the
+// canonical §12 scheme uses those positions for the field-mark flag
+// instead, and our wide-LTC synth has no field-mark, so we leave the bit
+// at 0 at 50/60.
+export function encodeFrameBits(hh, mm, ss, ff, dropFrame, cadenceFps = 30) {
   const bits = new Uint8Array(80);
   const frTens = Math.floor(ff / 10);
   writeLsbFirst(bits, 0, ff % 10, 4);
@@ -34,7 +44,17 @@ export function encodeFrameBits(hh, mm, ss, ff, dropFrame) {
   writeLsbFirst(bits, 40, Math.floor(mm / 10), 3);
   writeLsbFirst(bits, 48, hh % 10, 4);
   writeLsbFirst(bits, 56, Math.floor(hh / 10), 2);
-  bits[58] = (frTens >> 2) & 1;
+  if (cadenceFps >= 50) bits[58] = (frTens >> 2) & 1;
+  // Polarity-correction. Compute parity over bits 0..63 with the correction
+  // bit currently 0; if the zero-count is odd, set it to 1 to make even.
+  let polarityBit = -1;
+  if (cadenceFps === 24 || cadenceFps === 30) polarityBit = 27;
+  else if (cadenceFps === 25) polarityBit = 59;
+  if (polarityBit >= 0) {
+    let zeros = 0;
+    for (let i = 0; i < 64; i++) if (bits[i] === 0) zeros++;
+    if (zeros % 2 === 1) bits[polarityBit] = 1;
+  }
   for (let i = 0; i < 16; i++) bits[64 + i] = SYNC[i];
   return bits;
 }
@@ -123,7 +143,7 @@ export function buildLtcAudioBuffer({
   const allBits = new Uint8Array(totalBits);
   let { hh, mm, ss, ff } = start;
   for (let f = 0; f < frameCount; f++) {
-    const frameBits = encodeFrameBits(hh, mm, ss, ff, flagBit);
+    const frameBits = encodeFrameBits(hh, mm, ss, ff, flagBit, cadenceFps);
     allBits.set(frameBits, f * 80);
     const next = nextTc(hh, mm, ss, ff, cadenceFps, dropFrame);
     hh = next.hh; mm = next.mm; ss = next.ss; ff = next.ff;
