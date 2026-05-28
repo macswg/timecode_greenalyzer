@@ -213,13 +213,13 @@ function feedWithDriftedAdc(mrd, opts) {
 describe("parseFrame", () => {
   it("decodes a canonical 12:34:56:18 NDF frame", () => {
     const bits = buildFrameBits({ hh: 12, mm: 34, ss: 56, ff: 18 });
-    const parsed = parseFrame(bits);
-    expect(parsed).toEqual({ hh: 12, mm: 34, ss: 56, ff: 18, dropFrame: false, colorFrame: false });
+    const parsed = parseFrame(bits, 30);
+    expect(parsed).toMatchObject({ hh: 12, mm: 34, ss: 56, ff: 18, dropFrame: false, colorFrame: false });
   });
 
   it("reads the drop-frame flag", () => {
     const bits = buildFrameBits({ hh: 0, mm: 1, ss: 0, ff: 2, dropFrame: true });
-    const parsed = parseFrame(bits);
+    const parsed = parseFrame(bits, 30);
     expect(parsed.dropFrame).toBe(true);
     expect(parsed.hh).toBe(0);
     expect(parsed.mm).toBe(1);
@@ -227,7 +227,7 @@ describe("parseFrame", () => {
 
   it("reads the color-frame flag", () => {
     const bits = buildFrameBits({ hh: 1, mm: 2, ss: 3, ff: 4, colorFrame: true });
-    expect(parseFrame(bits).colorFrame).toBe(true);
+    expect(parseFrame(bits, 30).colorFrame).toBe(true);
   });
 
   it("returns null for out-of-range BCD digits", () => {
