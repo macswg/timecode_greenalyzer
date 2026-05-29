@@ -30,3 +30,5 @@ pnpm-debug.log*
 # SMPTE Standards -- not public
 /smpte-standards
 
+# TC test files (for dev)
+/testing_timecode
