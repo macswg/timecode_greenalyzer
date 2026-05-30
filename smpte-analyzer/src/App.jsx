@@ -282,7 +282,7 @@ function TimecodeDisplay({ hh, mm, ss, ff, dropFrame, rateKey, valid, dim }) {
   );
 }
 
-function LevelMeter({ label, value, peak, min=-60, max=0 }) {
+function LevelMeter({ label, value, peak, min=-60, max=0, showTicks=true }) {
   const clamp = (v) => Math.max(0, Math.min(1, (v - min) / (max - min)));
   const pct = clamp(value) * 100;
   const peakPct = clamp(peak) * 100;
@@ -329,11 +329,13 @@ function LevelMeter({ label, value, peak, min=-60, max=0 }) {
           }} />
         )}
       </div>
-      <div className="lm-ticks" style={{ display:"flex", justifyContent:"space-between", fontSize:10, color:"#444", fontFamily:"monospace" }}>
-        {markers.filter((_,i)=>i%2===0).map(db => (
-          <span key={db} style={{ position:"relative", left: db===-60?0:0 }}>{db}</span>
-        ))}
-      </div>
+      {showTicks && (
+        <div className="lm-ticks" style={{ display:"flex", justifyContent:"space-between", fontSize:10, color:"#444", fontFamily:"monospace" }}>
+          {markers.filter((_,i)=>i%2===0).map(db => (
+            <span key={db} style={{ position:"relative", left: db===-60?0:0 }}>{db}</span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -655,9 +657,9 @@ function SpecRefPanel() {
         MEASURING with the agreement counter (k/3) while accumulating
         toward commit.
         <br/><span style={{color:"#777"}}>SOURCE → HOST QUARTZ</span> —
-        the primary CLOCK DRIFT reading. Same value displayed above; shown
-        again here for context next to the other drifts. Positive = source
-        faster than this host's crystal.
+        the primary CLOCK DRIFT reading shown in LIVE INPUT STATUS (positive
+        = source faster than this host's crystal). It is the host-time
+        reference the two drifts below are read against.
         <br/><span style={{color:"#777"}}>SOURCE → ADC</span> — drift
         derived from the capture device's sample count instead of host
         time. Compares the source against whatever clock drives the audio
@@ -2000,7 +2002,7 @@ export default function SMPTEAnalyzer() {
       }} />
 
       {/* Header */}
-      <div className="header-row" style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:20 }}>
+      <div className="header-row" style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:10 }}>
         <div>
           <div style={{
             fontFamily:"'Orbitron', monospace",
@@ -2057,7 +2059,7 @@ export default function SMPTEAnalyzer() {
           marginBottom:6,
         }}>
           {ltcLocked
-            ? `● LTC LOCKED · ${analysis.framesDecoded} FRAMES DECODED`
+            ? "● LTC LOCKED"
             : "○ NO LTC SIGNAL — feed valid LTC into the selected input"}
         </div>
       )}
@@ -2210,14 +2212,16 @@ export default function SMPTEAnalyzer() {
         {/* Level Section */}
         <div className="panel-level" style={{ ...PANEL, padding:14, display:"flex", flexDirection:"column", gap:6 }}>
           <div style={{ fontSize:11, color:"#ff9900", letterSpacing:3 }}>SIGNAL LEVEL</div>
-          <LevelMeter label="RMS" value={analysis?.levelDbFS ?? levelDbFS} />
+          {/* RMS and PEAK share one identical dB scale; render it only under
+              PEAK (the lower meter) to save a row. */}
+          <LevelMeter label="RMS" value={analysis?.levelDbFS ?? levelDbFS} showTicks={false} />
           <LevelMeter label="PEAK" value={analysis?.peakDbFS ?? levelDbFS + 2} peak={peakHold} />
           <div style={{ height:"1px", background:"#111" }} />
           <Gauge label="SNR" value={analysis?.snr} min={0} max={80} unit=" dB"
             thresholds={[{above:-100,color:"#ff3b3b"},{above:10,color:"#ffaa00"},{above:15,color:"#00ff88"}]} />
           <Gauge label="THD" value={analysis?.thd} min={0} max={100} unit="%"
             thresholds={[{above:0,color:"#00ff88"},{above:50,color:"#ffaa00"},{above:70,color:"#ff3b3b"}]} />
-          <div style={{ fontSize:11, color:"#333", fontFamily:"monospace", lineHeight:1.8, marginTop:4 }}>
+          <div style={{ fontSize:11, color:"#333", fontFamily:"monospace", lineHeight:1.4, marginTop:2 }}>
             NOISE FLOOR: {Number.isFinite(analysis?.noiseFloor)
               ? `${analysis.noiseFloor.toFixed(1)} dB`
               : "—"}
@@ -2242,18 +2246,14 @@ export default function SMPTEAnalyzer() {
             locked={ltcLocked}
           />
           <div style={{ height:"1px", background:"#111" }} />
+          {/* Single raw-decode-lock line. SYNC WORD and the former BIT CLOCK row
+              were both bound to `ltcLocked` (one bit shown twice); BIT ERRORS and
+              FRAMES DECODED are shown in the grid legend above and in LIVE INPUT
+              STATUS. This line is `ltcLocked` (fresh decode), distinct from the
+              top LOCK badge which is `frameValid` (decode AND clean levels). */}
           <div style={{ fontSize:11, fontFamily:"monospace", color:"#444", lineHeight:2 }}>
             <div>SYNC WORD: <span style={{color: ltcLocked ? "#00ff88" : "#ff3b3b"}}>
               {ltcLocked ? "VALID" : "—"}
-            </span></div>
-            <div>BIT ERRORS: <span style={{color: (analysis?.bitErrors ?? 0) > 0 ? "#ffaa00" : "#00ff88"}}>
-              {liveMode ? (analysis?.bitErrors ?? 0) : "—"}
-            </span></div>
-            <div>BIT CLOCK: <span style={{color: ltcLocked ? "#00ff88" : "#666"}}>
-              {ltcLocked ? "LOCKED" : "UNLOCKED"}
-            </span></div>
-            <div>FRAMES DECODED: <span style={{color:"#888"}}>
-              {liveMode ? (analysis?.framesDecoded ?? 0) : "—"}
             </span></div>
           </div>
         </div>
@@ -2571,7 +2571,6 @@ export default function SMPTEAnalyzer() {
                               gap:"6px 12px", fontSize:11, fontFamily:"monospace" }}>
                   {(() => {
                     const obs = analysis?.carrierObs;
-                    const host = analysis?.driftPpm;
                     const adc = analysis?.driftPpmSourceVsAdc;
                     const cap = analysis?.captureClockErrorPpm;
                     const fmt = (v, digits = 1) => Number.isFinite(v)
@@ -2596,8 +2595,10 @@ export default function SMPTEAnalyzer() {
                             ? `MEASURING (${obs?.agreementCount ?? 0}/${obs?.agreementsRequired ?? 3} agreements)`
                             : `${obs.fractional ? "fractional" : "integer"} · ${obs.classConfidence}`}
                         </span>
-                        <span style={{ color:"#555", letterSpacing:1 }}>SOURCE → HOST QUARTZ</span>
-                        <span style={{ color:"#ccc" }}>{fmt(host)} ppm</span>
+                        {/* SOURCE → HOST QUARTZ is the same value as the
+                            LIVE INPUT STATUS · CLOCK DRIFT row (analysis.driftPpm);
+                            shown there as the primary readout. ADC + capture error
+                            stay here as the capture-chain diagnostic. */}
                         <span style={{ color:"#555", letterSpacing:1 }}>SOURCE → ADC</span>
                         <span style={{ color:"#888" }}>{fmt(adc)} ppm</span>
                         <span style={{ color:"#555", letterSpacing:1 }}>CAPTURE CLOCK ERROR</span>
