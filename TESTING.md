@@ -75,4 +75,47 @@ independent decoders.
 
 Tests 8–11 (device hot-swap, signal cut/resume, tab backgrounding, long-run
 stability) are live-hardware / browser behaviors that the file-decode harness
-cannot cover — they require the live DVS + browser setup.
+cannot cover — they require the live DVS + browser setup. See the operator
+checklist below.
+
+## Operator checklist — live tests (#8–#11)
+
+These exercise live capture-chain behaviors that can't be reproduced headlessly,
+so they're run by hand against the live Dante + browser. Record PASS/FAIL and a
+note for each.
+
+**Before you start**
+- [ ] Analyzer open at `http://localhost:5173`, **Live** mode (not simulation, no file loaded).
+- [ ] AUDIO INPUT device = **Dante Virtual Soundcard**; microphone permission granted.
+- [ ] F1 (`F1_LTC_01043000_2mins_29_97_DF_FPS_48000x16.wav`) looping from the sender.
+- [ ] Baseline locked: badge **● LOCKED**, rate **`29.97 DF`**, `CLASS: fractional · high`, DROPOUT ≈ 0 %, **no** NON-CONFORMANT banner.
+
+### #8 — Device hot-swap
+1. [ ] With F1 locked via DVS, change the AUDIO INPUT dropdown to the **built-in mic**.
+2. [ ] Wait ~5 s — built-in mic carries no LTC, so **○ NO SIGNAL** here is expected.
+3. [ ] Switch the dropdown **back to Dante Virtual Soundcard**.
+4. [ ] Repeat the DVS → mic → DVS swap 2–3 times.
+- **PASS:** every return to DVS re-locks within a few seconds — badge back to **● LOCKED**, rate back to `29.97 DF`; **no *persistent* ○ NO SIGNAL** after returning to DVS.
+- **FAIL:** stays NO SIGNAL on DVS after a swap; the macOS system *output* device changes; rate won't re-commit.
+- *Why it should pass:* one `AudioContext` is reused across switches (a fresh one would renegotiate Core Audio and can flip the system output); the worklet's audio-clock offset re-samples on each new stream.
+
+### #9 — Signal cut / resume
+1. [ ] With F1 locked via DVS, **stop the Dante sender** for ~5 s (badge should drop to **○ NO SIGNAL**).
+2. [ ] **Resume** the sender.
+- **PASS:** re-locks on resume, and **no continuity break is logged for the gap** — the session log shows no JUMP/REWIND at the resume point and the CONTINUITY count does not tick up from the cut.
+- **FAIL:** a REWIND/JUMP continuity entry appears at resume; lock doesn't recover.
+- *Note:* keep the cut **≥ 5 s** — a gap longer than 3 s clears the pending continuity state, which is what makes the resume clean. A sub-3 s blip may legitimately register a small break.
+
+### #10 — Tab backgrounding
+1. [ ] With F1 locked via DVS, switch to **another browser tab or app for 30+ s**.
+2. [ ] Switch back to the analyzer tab.
+- **PASS:** TC is **current** on return (advancing in step with the sender, not frozen or lagging); DROPOUT did **not** spike; **● LOCKED** retained throughout.
+- **FAIL:** TC frozen/behind on return; DROPOUT jumps; lock lost.
+- *Why it should pass:* the tick source runs in a Web Worker (~33 ms), which browsers do **not** throttle in background tabs (unlike `setInterval`/`requestAnimationFrame`).
+
+### #11 — Long-run stability
+1. [ ] With F1 locked via DVS, **leave it running ≥ 1 hour** (longer is better).
+2. [ ] Periodically note: badge, CONTINUITY count, DROPOUT %, and the drift readout.
+- **PASS:** lock holds the whole time; **no spurious continuity breaks** accumulate; DROPOUT stays ≈ 0 %; drift readout stays roughly steady.
+- **FAIL:** lock drops with no signal interruption; CONTINUITY count climbs; DROPOUT grows over time.
+- *Known limitation (not a failure):* the host-vs-source clock offset drifts at ~ppm/hour (the constant-offset assumption), so multi-day runs may show slow drift — expected, not a regression.
