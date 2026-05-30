@@ -1815,6 +1815,12 @@ export default function SMPTEAnalyzer() {
     sessionStartRef.current = Date.now();
   }
 
+  // Count-only reset: zeroes the error tally without touching the session log.
+  function clearErrorCount() {
+    setErrorCount(0);
+    setErrorCounts({ CLIP:0, HOT:0, LOW:0, DROPOUT:0, NOISE:0, DF_INVALID:0, AUDIO_GAP:0 });
+  }
+
   function downloadFile(name, mime, content) {
     const blob = new Blob([content], { type: mime });
     const url = URL.createObjectURL(blob);
@@ -1989,6 +1995,11 @@ export default function SMPTEAnalyzer() {
           <div style={{ fontSize:11, color: errorCount > 0 ? "#ff5500" : "#333", letterSpacing:2 }}>
             {errorCount} ERRORS
           </div>
+          <button onClick={clearErrorCount} disabled={errorCount === 0} style={{
+            ...buttonStyle(errorCount === 0 ? "#333" : "#ff3b3b", { padding:"3px 10px", fontSize:10 }),
+            opacity: errorCount === 0 ? 0.4 : 1,
+            marginTop:4,
+          }}>✕ CLEAR</button>
         </div>
       </div>
 
@@ -2789,7 +2800,7 @@ export default function SMPTEAnalyzer() {
             {[
               { label:"⇩ CSV", onClick: exportCSV, color:"#00ff88" },
               { label:"⇩ JSON", onClick: exportJSON, color:"#00ff88" },
-              { label:"✕ CLEAR", onClick: clearLog, color:"#ff3b3b" },
+              { label:"✕ CLEAR LOGS", onClick: clearLog, color:"#ff3b3b" },
             ].map(b => {
               const disabled = sessionLog.length === 0;
               return (

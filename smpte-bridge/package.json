@@ -1,6 +1,6 @@
 {
   "name": "smpte-bridge",
-  "version": "1.0.0",
+  "version": "1.5.0",
   "private": true,
   "type": "module",
   "description": "Fan-out sidecar for the SMPTE timecode analyzer. Ingests timecode from the browser over WebSocket and rebroadcasts to subscribers (Phase 1: WS only; OSC/Art-Net to follow).",
