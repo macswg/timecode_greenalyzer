@@ -33,20 +33,24 @@ at least one real minute boundary inside the body, not just at the loop wrap.
 
 ## Test matrix
 
+Completed tests are ~~struck through~~ and prefixed ✅; open tests stand out
+in normal weight. Full evidence for the passed tests is collapsed under
+**Results** below.
+
 | # | Test | Files | What to verify |
 |---|------|-------|----------------|
-| 1 | **Real minute boundary** | F1 file-drop, F1 via Dante | Rate label = `29.97 DF`. After the first loop wrap and again after the second, `dfFlagMatchesObservedCadence` stays true. No `DF flag bit disagrees` warning. |
-| 2 | **NDF negative control** | F2 file-drop, F2 via Dante | Rate label = `29.97 ND`. Stays ND across multiple loop wraps. No spurious DF inference. |
-| 3 | **59.94 DF cadence** | F3 file-drop, F3 via Dante | Rate label = `59.94 DF`. 4-frame skip recognized at each real minute boundary. |
-| 4 | **23.976 carrier classification** | F4 file-drop, F4 via Dante | `CLASS: fractional · high`, label = `23.976 ND`. Should never flip to `24 ND`. |
-| 5 | **25 / 30 integer rates** | F5, F6 via Dante | Correct labels, `CLASS: integer · high`. No `NON-CONFORMANT` banner. |
-| 6 | **Day rollover** (optional) | F7 via Dante | Normal lock through `23:59→00:00`. No phantom continuity break at the hour roll. |
-| 7 | **10th-minute exclusion** (optional) | F8 via Dante | The `01:09→01:10` crossing is correctly skipped from the boundary histogram (it can't disambiguate DF vs ND). DF inference comes from `01:04→01:05`, `01:05→01:06`, etc. |
+| ✅ ~~1~~ | ~~**Real minute boundary**~~ | ~~F1 file-drop, F1 via Dante~~ | ~~Rate label = `29.97 DF`. After the first loop wrap and again after the second, `dfFlagMatchesObservedCadence` stays true. No `DF flag bit disagrees` warning.~~ |
+| ✅ ~~2~~ | ~~**NDF negative control**~~ | ~~F2 file-drop, F2 via Dante~~ | ~~Rate label = `29.97 ND`. Stays ND across multiple loop wraps. No spurious DF inference.~~ |
+| ✅ ~~3~~ | ~~**59.94 DF cadence**~~ | ~~F3 file-drop, F3 via Dante~~ | ~~Rate label = `59.94 DF`. 4-frame skip recognized at each real minute boundary.~~ |
+| ✅ ~~4~~ | ~~**23.976 carrier classification**~~ | ~~F4 file-drop, F4 via Dante~~ | ~~`CLASS: fractional · high`, label = `23.976 ND`. Should never flip to `24 ND`.~~ |
+| ✅ ~~5~~ | ~~**25 / 30 integer rates**~~ | ~~F5, F6 via Dante~~ | ~~Correct labels, `CLASS: integer · high`. No `NON-CONFORMANT` banner.~~ |
+| ✅ ~~6~~ | ~~**Day rollover** (optional)~~ | ~~F7 via Dante~~ | ~~Normal lock through `23:59→00:00`. No phantom continuity break at the hour roll.~~ |
+| ✅ ~~7~~ | ~~**10th-minute exclusion** (optional)~~ | ~~F8 via Dante~~ | ~~The `01:09→01:10` crossing is correctly skipped from the boundary histogram (it can't disambiguate DF vs ND). DF inference comes from `01:04→01:05`, `01:05→01:06`, etc.~~ |
 | 8 | **Device hot-swap** | F1 via Dante, then switch input to built-in mic, then back to DVS | Each switch re-locks within a few seconds. `audioClockOffsetMsRef` re-samples cleanly. No persistent NO SIGNAL. |
 | 9 | **Signal cut/resume** | F1 via Dante; stop the Dante sender ~5 s, resume | Re-locks without a phantom continuity break (the >3 s gap reset should clear `lastBreak`). |
 | 10 | **Tab backgrounding** | F1 via Dante; switch to another tab for 30+ s; switch back | TC current on return, dropout rate doesn't spike, lock retained. |
 | 11 | **Long-run stability** | F1 via Dante; leave running ≥1 hour | No spurious continuity breaks, no growing dropout, lock holds. Note: multi-day stability is eventually limited by the constant-offset assumption drifting at ~ppm/hour — known limitation, not a test failure. |
-| 12 | **Rate change mid-stream** | F1 then F4 from the same source without restarting the analyzer | Carrier classifier should `DIVERGENCE` on the rate change, unlock, then re-`MEASURING_COMMIT` on 23.976 within ~20 s. Cadence detector should follow without leaking 29.97-era hits into the 23.976 inference. |
+| ✅ ~~12~~ | ~~**Rate change mid-stream**~~ | ~~F1 then F4 from the same source without restarting the analyzer~~ | ~~Carrier classifier should `DIVERGENCE` on the rate change, unlock, then re-`MEASURING_COMMIT` on 23.976 within ~20 s. Cadence detector should follow without leaking 29.97-era hits into the 23.976 inference.~~ |
 
 ### Optional thoroughness
 
@@ -62,6 +66,11 @@ Each completed test is verified by feeding the test WAV through the real
 decoders (no repo code). ✅ = passed the real-decoder harness **and** both
 independent decoders.
 
+**Headless tests 1–7, 12 — ✅ all PASS (2026-05-29).** Evidence collapsed:
+
+<details>
+<summary>Show evidence for passed tests</summary>
+
 | # | Test | Status | Verified | Evidence |
 |---|------|--------|----------|----------|
 | 1 | Real minute boundary (F1) | ✅ PASS | 2026-05-29 | `29.97 DF`, `detectedRateKey 29.97df`; `dfFlagMatches` true across all loop wraps (no "DF flag disagrees"); `dfHits 6 / ndfHits 0`; carrier 29.97 fractional (~1601.6 samples/frame); triple-confirmed. Harness: `test/manual/f1_groundtruth.test.js`. |
@@ -72,6 +81,8 @@ independent decoders.
 | 6 | Day rollover (F7) | ✅ PASS (after fix) | 2026-05-29 | Locks `29.97 DF` through `23:59:59;29 → 00:00:00;00`. **Fixed** a phantom day-roll REWIND: continuity now uses a cyclic (mod `framesPerDay`) delta so the midnight wrap reads as +1, not a full-day backward jump. Harness: `test/manual/f7_dayroll.test.js`; CI unit test: `test/cadenceDetector.test.js`. |
 | 7 | 10th-minute exclusion (F8) | ✅ PASS | 2026-05-29 | `29.97 DF` across `01:07:30 → 01:10:30`. `01:08:00` & `01:09:00` skip to `ff=2` (DF); the tenth-minute `01:10:00` lands on `ff=0` and is correctly **excluded** from the DF/NDF histogram (`dfHits 2 / ndfHits 0`); triple-confirmed. Harness: `test/manual/f8_tenthmin.test.js`. |
 | 12 | Rate change mid-stream (F1→F4) | ✅ PASS | 2026-05-29 | `29.97 DF` → `23.976 ND` re-locks in ~2.6 s; cadence follows to 24 ND with no 29.97-era leak (relies on the cadence-reset fix). Re-lock event is `RATE_CHANGE` — for a nominal-fps change the winner decoder switches; `DIVERGENCE` is only for same-nominal fractional↔integer flips, so TESTING.md's "should DIVERGENCE" wording above is imprecise for this transition. Harness: `test/manual/rate_change.test.js`. |
+
+</details>
 
 Tests 8–11 (device hot-swap, signal cut/resume, tab backgrounding, long-run
 stability) are live-hardware / browser behaviors that the file-decode harness
@@ -118,4 +129,4 @@ note for each.
 2. [ ] Periodically note: badge, CONTINUITY count, DROPOUT %, and the drift readout.
 - **PASS:** lock holds the whole time; **no spurious continuity breaks** accumulate; DROPOUT stays ≈ 0 %; drift readout stays roughly steady.
 - **FAIL:** lock drops with no signal interruption; CONTINUITY count climbs; DROPOUT grows over time.
-- *Known limitation (not a failure):* the host-vs-source clock offset drifts at ~ppm/hour (the constant-offset assumption), so multi-day runs may show slow drift — expected, not a regression.
+- *Known limitation (not a failure):* the host-vs-source clock offset drifts at ~ppm/hour (the constant-offset assumption), so multi-day runs may show slow drift — expected, not a regression. 
