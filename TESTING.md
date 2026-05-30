@@ -67,5 +67,8 @@ independent decoders.
 | 2 | NDF negative control | ✅ PASS | 2026-05-29 | `29.97 ND`; never inferred DF (`dfHits 0`); triple-confirmed. Harness: `test/manual/f2_groundtruth.test.js`. |
 | 3 | 59.94 DF cadence | ✅ PASS | 2026-05-29 | `59.94 DF`; 4-frame skip → `ff=4` at each minute boundary; triple-confirmed. F3 regenerated — old `BAD_F3` was a 60 fps carrier carrying a 30-cadence count. Harness: `test/manual/gen_f3.test.js`. |
 | 4 | 23.976 carrier classification | ✅ PASS | 2026-05-29 | `23.976 ND`, `CLASS: fractional · high`; ~2002.0 samples/frame, never flips to `24` (`sawTwentyFour=0`); quadruple-confirmed. Harness: `test/manual/f4_groundtruth.test.js`. |
+| 5 | 25 / 30 integer rates | ✅ PASS | 2026-05-29 | F5 `25` and F6 `30`, both `CLASS: integer · high`, no NON-CONFORMANT banner. F5 never misframed as 24/30; F6 is integer 30 (1600.0 samples/frame), not 29.97 (1601.6), and raises no DF warning; triple-confirmed per file. Harness: `test/manual/f5_groundtruth.test.js`. |
+| 6 | Day rollover (F7) | ✅ PASS (after fix) | 2026-05-29 | Locks `29.97 DF` through `23:59:59;29 → 00:00:00;00`. **Fixed** a phantom day-roll REWIND: continuity now uses a cyclic (mod `framesPerDay`) delta so the midnight wrap reads as +1, not a full-day backward jump. Harness: `test/manual/f7_dayroll.test.js`; CI unit test: `test/cadenceDetector.test.js`. |
+| 12 | Rate change mid-stream (F1→F4) | ✅ PASS | 2026-05-29 | `29.97 DF` → `23.976 ND` re-locks in ~2.6 s; cadence follows to 24 ND with no 29.97-era leak (relies on the cadence-reset fix). Re-lock event is `RATE_CHANGE` — for a nominal-fps change the winner decoder switches; `DIVERGENCE` is only for same-nominal fractional↔integer flips, so TESTING.md's "should DIVERGENCE" wording above is imprecise for this transition. Harness: `test/manual/rate_change.test.js`. |
 
-Tests 1 and 5–12 not yet verified in this pass.
+Tests 1, 7, and 8–11 not yet verified in this pass.
