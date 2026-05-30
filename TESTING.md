@@ -53,3 +53,19 @@ at least one real minute boundary inside the body, not just at the loop wrap.
 For broader coverage, run tests 1–5 from a third machine through a different
 Dante DSP path (e.g. with a sample-rate converter in the chain) to confirm
 the analyzer still locks even when SRC is present upstream.
+
+## Results
+
+Each completed test is verified by feeding the test WAV through the real
+`MultiRateDecoder` + `CadenceDetector` headlessly (`npm run test:manual` in
+`smpte-analyzer/`) and independently cross-checking with two from-scratch LTC
+decoders (no repo code). ✅ = passed the real-decoder harness **and** both
+independent decoders.
+
+| # | Test | Status | Verified | Evidence |
+|---|------|--------|----------|----------|
+| 2 | NDF negative control | ✅ PASS | 2026-05-29 | `29.97 ND`; never inferred DF (`dfHits 0`); triple-confirmed. Harness: `test/manual/f2_groundtruth.test.js`. |
+| 3 | 59.94 DF cadence | ✅ PASS | 2026-05-29 | `59.94 DF`; 4-frame skip → `ff=4` at each minute boundary; triple-confirmed. F3 regenerated — old `BAD_F3` was a 60 fps carrier carrying a 30-cadence count. Harness: `test/manual/gen_f3.test.js`. |
+| 4 | 23.976 carrier classification | ✅ PASS | 2026-05-29 | `23.976 ND`, `CLASS: fractional · high`; ~2002.0 samples/frame, never flips to `24` (`sawTwentyFour=0`); quadruple-confirmed. Harness: `test/manual/f4_groundtruth.test.js`. |
+
+Tests 1 and 5–12 not yet verified in this pass.
