@@ -23,7 +23,7 @@
 //     different cadence used to register continuous spurious JUMPs.
 
 import { tcString } from "./ltcDecoder";
-import { tcToFrameNumber, minuteBoundaryDfRange } from "./dropFrame";
+import { tcToFrameNumber, minuteBoundaryDfRange, framesPerDay } from "./dropFrame";
 
 const STANDARD_CADENCES = [24, 25, 30, 50, 60];
 
@@ -58,6 +58,31 @@ export class CadenceDetector {
     // Continuity.
     this.continuityBreaks = 0;
     this.lastBreak = null;
+    this._prevFrameNumber = null;
+    this._prevTc = null;
+    this._prevT = null;
+  }
+
+  // Flush cadence/DF inference and per-frame tracking for a fresh start.
+  // Called by MultiRateDecoder when the carrier classifier signals a source
+  // rate/flavor change, so cumulative evidence from the previous stream
+  // (rollover histogram, minute-boundary DF tallies, DF-flag window) stops
+  // driving cadenceFps()/isDropFrame() — and hence the NON-CONFORMANT
+  // mismatch — long after the input has changed. After this, isDropFrame()
+  // has zero boundary observations and falls back to the rolling DF-flag
+  // window, so DF re-acquires within seconds rather than at the next minute
+  // boundary. The lifetime continuityBreaks counter and lastBreak are left
+  // alone (they have their own signal-gap lifecycle); only the per-frame
+  // tracking refs are cleared so the first frame of the new stream doesn't
+  // register a spurious continuity break across the transition.
+  reset() {
+    this.framesSeen = 0;
+    this.maxFFObserved = 0;
+    this.rolloverHist = new Map();
+    this._prevFrame = null;
+    this.minuteBoundaryDfHits = 0;
+    this.minuteBoundaryNdfHits = 0;
+    this._dfFlagWindow = [];
     this._prevFrameNumber = null;
     this._prevTc = null;
     this._prevT = null;
@@ -118,7 +143,15 @@ export class CadenceDetector {
       }
       const current = tcToFrameNumber(frame.hh, frame.mm, frame.ss, frame.ff, cadence, df);
       if (this._prevFrameNumber != null) {
-        const delta = current - this._prevFrameNumber;
+        // Timecode is a 24h cyclic counter; tcToFrameNumber wraps to 0 at
+        // midnight. Compute the minimal cyclic delta so a +1 step across the
+        // day rollover (23:59:59:FF -> 00:00:00:00) reads as +1 rather than a
+        // full-day REWIND, while small jumps/rewinds keep their true sign and
+        // magnitude. Only an (unusual) intentional skip of more than 12h across
+        // midnight would be taken the short way around.
+        const fpd = framesPerDay(cadence, df);
+        let delta = (((current - this._prevFrameNumber) % fpd) + fpd) % fpd;
+        if (delta > fpd / 2) delta -= fpd;
         if (delta !== 1) {
           this.continuityBreaks++;
           this.lastBreak = {

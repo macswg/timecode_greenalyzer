@@ -79,6 +79,20 @@ export function tcToFrameNumber(hh, mm, ss, ff, fps, dropFrame) {
   return ((hh * 60 + mm) * 60 + ss) * fps + ff - dropped;
 }
 
+// Total frame count in a 24-hour day for a given cadence — the value
+// tcToFrameNumber() wraps through at midnight (00:00:00:00 is frame 0, so
+// 23:59:59:FF is framesPerDay-1). Used by continuity detection to compute the
+// minimal cyclic delta across the day rollover; without it, a +1 step over
+// midnight reads as a full-day backward jump (phantom REWIND). Mirrors
+// tcToFrameNumber's DF drop accounting over the whole day (1440 minutes, 144
+// tenth-minutes exempt).
+export function framesPerDay(fps, dropFrame) {
+  if (!dropFrame) return 24 * 60 * 60 * fps;
+  const totalMins = 24 * 60;
+  const dropped = dropPerMin(fps) * (totalMins - Math.floor(totalMins / 10));
+  return 24 * 60 * 60 * fps - dropped;
+}
+
 // Conformance check: at a non-tenth-minute boundary (ss=0, mm%10!=0), a DF
 // count is required to skip frames 00..dropPerMin-1, so any ff < dropPerMin
 // at that position is a spec violation. Also bounds-checks the fields.

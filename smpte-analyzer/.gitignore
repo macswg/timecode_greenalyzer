@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# On-demand harness generated outputs (test/manual/*.test.js write these)
+test/manual/*.json
