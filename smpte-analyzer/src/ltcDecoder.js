@@ -409,6 +409,11 @@ export class MultiRateDecoder {
     // source toggles it every frame; a wide-LTC source (#34) leaves it
     // static. fieldMarkBehavior() classifies the recent toggle pattern.
     this._recentFieldMarks = [];            // { t, v }
+    // Cadence-reset triggers (see feed()): the winning decoder's last nominal
+    // fps and the timestamp of the last carrier event we acted on, so a source
+    // rate/flavor change flushes the cadence detector's cumulative inference.
+    this._lastWinnerFps = null;
+    this._lastHandledCarrierEventT = 0;
   }
 
   // Probe performance.now() resolution by sampling deltas. Repeated calls in
@@ -441,6 +446,24 @@ export class MultiRateDecoder {
     // and signal-loss hold — none of which should be gated on whether
     // anything happens to call carrierObservation() during this tick.
     this.carrierObservation();
+    // Flush the cadence detector's cumulative inference when the carrier
+    // indicates a source rate/flavor change, so the NON-CONFORMANT mismatch and
+    // cadence readout stop reporting the previous stream's evidence. Two
+    // complementary triggers: a change in the winning decoder's nominal fps
+    // (nominal-rate changes, e.g. 59.94<->29.97, where the winner switches) and
+    // a carrier DIVERGENCE / RATE_CHANGE event (fractional<->integer at the
+    // same nominal, e.g. 29.97<->30, where the winner fps does not change).
+    // After the reset, isDropFrame() falls back to the rolling DF-flag window,
+    // so DF recovers within seconds instead of waiting a full minute boundary.
+    const winnerFps = this.nominalFps;
+    const ev = this._lastEvent;
+    const newCarrierEvent = !!ev && ev.t !== this._lastHandledCarrierEventT &&
+      (ev.type === "DIVERGENCE" || ev.type === "RATE_CHANGE");
+    const winnerFpsChanged = winnerFps != null && this._lastWinnerFps != null &&
+      winnerFps !== this._lastWinnerFps;
+    if (winnerFpsChanged || newCarrierEvent) this.cadenceDetector.reset();
+    if (winnerFps != null) this._lastWinnerFps = winnerFps;
+    if (ev) this._lastHandledCarrierEventT = ev.t;
     // Drain the winning decoder's pending frames into the cadence detector.
     // A single audio chunk can contain more than one LTC frame; checking only
     // `lastFrame` per chunk would miss intermediate frames.

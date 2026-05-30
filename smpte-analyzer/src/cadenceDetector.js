@@ -63,6 +63,31 @@ export class CadenceDetector {
     this._prevT = null;
   }
 
+  // Flush cadence/DF inference and per-frame tracking for a fresh start.
+  // Called by MultiRateDecoder when the carrier classifier signals a source
+  // rate/flavor change, so cumulative evidence from the previous stream
+  // (rollover histogram, minute-boundary DF tallies, DF-flag window) stops
+  // driving cadenceFps()/isDropFrame() — and hence the NON-CONFORMANT
+  // mismatch — long after the input has changed. After this, isDropFrame()
+  // has zero boundary observations and falls back to the rolling DF-flag
+  // window, so DF re-acquires within seconds rather than at the next minute
+  // boundary. The lifetime continuityBreaks counter and lastBreak are left
+  // alone (they have their own signal-gap lifecycle); only the per-frame
+  // tracking refs are cleared so the first frame of the new stream doesn't
+  // register a spurious continuity break across the transition.
+  reset() {
+    this.framesSeen = 0;
+    this.maxFFObserved = 0;
+    this.rolloverHist = new Map();
+    this._prevFrame = null;
+    this.minuteBoundaryDfHits = 0;
+    this.minuteBoundaryNdfHits = 0;
+    this._dfFlagWindow = [];
+    this._prevFrameNumber = null;
+    this._prevTc = null;
+    this._prevT = null;
+  }
+
   feed(frame) {
     this.framesSeen++;
     if (frame.ff > this.maxFFObserved) this.maxFFObserved = frame.ff;
