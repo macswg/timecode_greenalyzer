@@ -432,23 +432,21 @@ function BitStreamView({ bits, bitErrors, locked }) {
   );
 }
 
-// Shows just the currently detected rate as a single bar with its confidence
-// fill. Previously rendered one bar per candidate rate, but the unselected
-// bars carried no information once the winner was determined.
-function RateDetector({ rateKey, candidateStatus, confidence }) {
-  // Confidence for the active rate. In live mode derive from the winning
-  // candidate's frame count (60 frames ≈ 2 s of clean LTC → full). In sim
-  // mode the supplied `confidence` is the source of truth.
-  let pct = confidence;
-  if (candidateStatus && rateKey) {
-    const fps = rateKeyToNominalFps(rateKey);
-    const s = candidateStatus.find(c => c.fps === fps);
-    if (s) pct = Math.min(100, (s.framesDecoded ?? 0) * (100 / 60));
-  }
+// Shows the currently detected rate as a single bar whose fill is the live
+// decode confidence (windowed 100 − dropoutPct), with the percentage printed
+// inline. Previously the bar fill was the winning candidate's cumulative frame
+// count — an acquisition ramp that pinned at 100 once locked and carried no
+// information thereafter, duplicated by a separate CONFIDENCE box below. Both
+// were collapsed into this one reactive gauge.
+function RateDetector({ rateKey, confidence }) {
+  const pct = confidence;
   const label = rateKey ? (SMPTE_RATES[rateKey]?.label ?? rateKey) : "—";
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
-      <div style={{ fontSize:11, color:"#555", fontFamily:"monospace", letterSpacing:2, marginBottom:2 }}>DETECTED RATE</div>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:2 }}>
+        <span style={{ fontSize:11, color:"#555", fontFamily:"monospace", letterSpacing:2 }}>DETECTED RATE</span>
+        <span style={{ fontSize:10, color:"#555", fontFamily:"monospace", letterSpacing:2 }}>CONFIDENCE</span>
+      </div>
       <div style={{ display:"flex", alignItems:"center", gap:8, lineHeight:1.4 }}>
         <span style={{ fontSize:13, fontFamily:"monospace", color:"#00ff88", width:80, lineHeight:1.4 }}>
           {label}
@@ -462,7 +460,9 @@ function RateDetector({ rateKey, candidateStatus, confidence }) {
             transition:"width 0.3s",
           }} />
         </div>
-        <span style={{ fontSize:10, color:"#00ff88", fontFamily:"monospace" }}>●</span>
+        <span style={{ fontSize:12, color:"#00ff88", fontFamily:"monospace", minWidth:42, textAlign:"right" }}>
+          {pct.toFixed(1)}%
+        </span>
       </div>
     </div>
   );
@@ -1010,7 +1010,6 @@ export default function SMPTEAnalyzer() {
       data.framesDecoded = dec?.framesDecoded ?? 0;
       data.bitErrors = dec?.bitErrors ?? 0;
       data.lastFrameBits = dec?.lastFrameBits ?? null;
-      data.candidateStatus = dec?.candidateStatus() ?? null;
       data.lastBreak = dec?.lastBreak ?? null;
       data.rateKey = effectiveRate;
 
@@ -1989,9 +1988,8 @@ export default function SMPTEAnalyzer() {
           .level-meter .lm-value { text-align: right !important; }
           .gauge { gap: 2px !important; }
 
-          /* Compact RATE DETECTION panel and its CONFIDENCE box. */
+          /* Compact RATE DETECTION panel. */
           .panel-rate { padding: 10px !important; gap: 6px !important; }
-          .confidence-box { padding: 6px !important; }
         }
       `}</style>
 
@@ -2231,18 +2229,8 @@ export default function SMPTEAnalyzer() {
           <div style={{ fontSize:11, color:"#ff9900", letterSpacing:3 }}>RATE DETECTION</div>
           <RateDetector
             rateKey={detectorRateKey}
-            candidateStatus={liveMode ? analysis?.candidateStatus : null}
             confidence={confidence}
           />
-          <div className="confidence-box" style={{ marginTop:"auto", padding:"4px 6px", background:"#0d0d0d", border:"1px solid #1a1a1a", borderRadius:2, display:"flex", alignItems:"center", gap:8 }}>
-            <div style={{ fontSize:10, color:"#555", letterSpacing:2 }}>CONFIDENCE</div>
-            <div style={{ flex:1, height:4, background:"#111", borderRadius:2 }}>
-              <div style={{ width:`${confidence}%`, height:"100%", background:"#00ff88", borderRadius:2, boxShadow:"0 0 6px #00ff8866" }} />
-            </div>
-            <div style={{ fontSize:12, color:"#00ff88", fontFamily:"monospace", minWidth:42, textAlign:"right" }}>
-              {confidence.toFixed(1)}%
-            </div>
-          </div>
         </div>
 
         {/* Bit Integrity */}
