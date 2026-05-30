@@ -58,6 +58,13 @@ const LEVEL_SPEC = {
 // analyser + worklet at unity, bypassing Web Audio's mono down-mix weighting.
 const LTC_CHANNEL = 0;
 
+// Audio-clock → performance.now() offset tracking (see wireSourceToDecoder).
+// Re-sample getOutputTimestamp at most this often, and low-pass the result so
+// a noisy seed converges away in a few seconds while slow ADC-clock drift is
+// still followed. At ~24 chunks/s a 2 s interval ≈ every 48th message.
+const OFFSET_RESAMPLE_MS = 2000;
+const OFFSET_EMA_ALPHA = 0.2;
+
 function computeRMS(buffer) {
   let sum = 0;
   for (let i = 0; i < buffer.length; i++) sum += buffer[i] * buffer[i];
@@ -692,10 +699,15 @@ export default function SMPTEAnalyzer() {
   const [sessionLog, setSessionLog] = useState([]);
   const audioCtxRef = useRef(null);
   // Offset (in ms) added to audio-clock-domain chunk stamps from the worklet
-  // to translate them into main-thread performance.now() domain. Computed
-  // once per wired source via AudioContext.getOutputTimestamp(); see
-  // wireSourceToDecoder. Null until the first samples message.
+  // to translate them into main-thread performance.now() domain. Seeded on
+  // the first samples message and then periodically re-sampled + EMA-tracked
+  // via AudioContext.getOutputTimestamp() so it follows the slow ADC-clock
+  // drift (~10 ms/hr, see #52) instead of being frozen at a possibly-biased
+  // one-shot value (see #56). Null until the first samples message.
   const audioClockOffsetMsRef = useRef(null);
+  // performance.now() at which the offset was last re-sampled (throttles the
+  // getOutputTimestamp re-measure to once per OFFSET_RESAMPLE_MS).
+  const audioClockOffsetSampledAtRef = useRef(0);
   const analyserRef = useRef(null);
   const sourceRef = useRef(null);
   const rafRef = useRef(null);
@@ -1546,11 +1558,12 @@ export default function SMPTEAnalyzer() {
     sampleClockRef.current = { n: 0, marks: [] };
     measuredRateEmaRef.current = null;
     // Re-measure the audio-clock → main-thread perf.now() offset on the next
-    // worklet message. The offset is constant for the AudioContext, but
-    // resetting per-source guarantees we sample it while the new graph is
+    // worklet message, then keep re-sampling it (see the onmessage handler).
+    // Resetting per-source guarantees we re-seed it while the new graph is
     // actually running (getOutputTimestamp can be stale when ctx was just
     // suspended).
     audioClockOffsetMsRef.current = null;
+    audioClockOffsetSampledAtRef.current = 0;
     worklet.port.onmessage = (e) => {
       const msg = e.data;
       if (msg.type === "glitch") {
@@ -1565,22 +1578,37 @@ export default function SMPTEAnalyzer() {
       // main-thread performance.now() — the freshness check (App.jsx:905)
       // and dropoutPct compare lf.t against main-thread performance.now(),
       // so we must translate. AudioContext.getOutputTimestamp() returns
-      // paired (contextTime in s, performanceTime in ms); the offset is
-      // constant for the lifetime of the context, so cache it once.
-      // Chunk-to-chunk deltas are preserved exactly, so the LSQ carrier-rate
-      // classifier still reads against the host quartz via this offset.
-      if (audioClockOffsetMsRef.current == null) {
+      // paired (contextTime in s, performanceTime in ms); the difference is
+      // the offset we add to chunk stamps. Chunk-to-chunk deltas are
+      // preserved exactly, so the LSQ carrier-rate classifier still reads
+      // against the host quartz via this offset.
+      //
+      // The offset is NOT frozen after the first read. The audio↔host clock
+      // relationship drifts at the ADC clock error (~few ppm ≈ 10 ms/hr,
+      // #52), and a one-shot read taken while the main thread was momentarily
+      // busy (esp. the receipt-time fallback) bakes that jitter in as a
+      // permanent bias that can push lf.t intermittently past the 200 ms
+      // freshness gate (#56). So we re-sample getOutputTimestamp once per
+      // OFFSET_RESAMPLE_MS and EMA toward it: the seed converges away within
+      // a few seconds and slow drift is tracked thereafter.
+      const tNow = performance.now();
+      if (audioClockOffsetMsRef.current == null ||
+          tNow - audioClockOffsetSampledAtRef.current >= OFFSET_RESAMPLE_MS) {
+        let measured = null;
         try {
           const ots = ctx.getOutputTimestamp();
           if (ots && Number.isFinite(ots.contextTime) && Number.isFinite(ots.performanceTime)) {
-            audioClockOffsetMsRef.current = ots.performanceTime - ots.contextTime * 1000;
+            measured = ots.performanceTime - ots.contextTime * 1000;
           }
-        } catch { /* fall through to receipt-stamp fallback */ }
-        if (audioClockOffsetMsRef.current == null) {
-          // Fallback: anchor to receipt time. Less precise (adds main-thread
-          // scheduling jitter) but works if getOutputTimestamp is unavailable.
-          audioClockOffsetMsRef.current = performance.now() - msg.chunkWallEnd;
-        }
+        } catch { /* getOutputTimestamp unavailable — fall through */ }
+        // Fallback only when getOutputTimestamp gives nothing: anchor to
+        // receipt time. Jittery, but EMA-smoothed across samples it beats a
+        // single frozen value.
+        if (measured == null) measured = tNow - msg.chunkWallEnd;
+        audioClockOffsetMsRef.current = audioClockOffsetMsRef.current == null
+          ? measured
+          : audioClockOffsetMsRef.current + OFFSET_EMA_ALPHA * (measured - audioClockOffsetMsRef.current);
+        audioClockOffsetSampledAtRef.current = tNow;
       }
       const off = audioClockOffsetMsRef.current;
       decoder.feed(samples, sampleRateRef.current, msg.chunkWallStart + off, msg.chunkWallEnd + off);
