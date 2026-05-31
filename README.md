@@ -24,13 +24,15 @@ timecode_greenalyzer/
 │   │   ├── ltcDecoder.js        Biphase decoder, MultiRateDecoder, wall-clock carrier classifier
 │   │   ├── cadenceDetector.js   FF-sequence cadence inference, DF skip detection
 │   │   ├── dropFrame.js         Drop-frame math (framesToTc, dropPerMin)
-│   │   ├── ltcSynth.js          LTC synthesizer (independent carrier / cadence knobs)
+│   │   ├── ltcSynth.js          LTC synthesizer (independent carrier / cadence knobs; wide + frame-pair)
+│   │   ├── channelDetect.js     Auto-detect the LTC channel in a multi-channel file
 │   │   ├── publisher.js         Reconnecting WebSocket publisher
 │   │   └── tickWorker.js        Web Worker tick source
 │   ├── public/
 │   │   └── ltc-worklet.js       AudioWorklet sample capture (wall-clock stamped)
 │   └── test/
-│       └── ltcDecoder.test.js   Unit tests (Vitest)
+│       ├── *.test.js            Unit tests (Vitest) — decoder, cadence, frame-pair, channel detect
+│       └── manual/              On-demand harnesses over the testing_timecode WAVs (npm run test:manual)
 └── smpte-bridge/       Node WS sidecar — fan-out to subscribers
     └── src/index.js
 ```
@@ -166,10 +168,12 @@ Linear Timecode is encoded as a **biphase mark** (bi-phase mark coding, or BMC) 
 
 At a high level, the 80 bits carry HH/MM/SS/FF as BCD digits, a drop-frame flag, a color-frame flag, three binary-group flags, eight 4-bit user-bit groups interleaved between the timecode digits, and a 16-bit sync word at the end of the frame. The bit-exact field layout is defined by the standard — see the ST 12-1 document, or any of the widely-available secondary descriptions (e.g. the Wikipedia "Linear timecode" article), for the per-bit field assignments. The actual bit positions consumed by this analyzer are visible in `parseFrame` in `smpte-analyzer/src/ltcDecoder.js`.
 
-**High-frame-rate (HFR) handling.** The standard 2-bit frame-tens field only encodes FF values 0–39, which is enough for cadences up to 30. For 50/60-fps cadences, this analyzer reads bit 58 as a third frame-tens bit so FF can reach 79 — a "wide LTC" convention used by several sound-recorder vendors. Caveats to be aware of:
+**High-frame-rate (HFR) handling — two 50/60 conventions (§12).** The standard 2-bit frame-tens field only encodes FF values 0–39, which is enough for cadences up to 30. At 50/60 fps there are two encodings in the wild, and the analyzer **auto-detects which a source uses** by watching the **field-mark flag** (bit 27 at 60-frame, bit 59 at 50-frame):
 
-- This is a de facto convention, not the only one. Real-world HFR generators are not unanimous about which bit becomes the extra frame-tens MSB; some vendors use bit 35 or bit 59 instead. A generator that uses a different bit will mis-decode at FF≥40 against this analyzer.
-- A generator that uses bit 58 for binary group flags at a ≤30 cadence will mis-decode FF whenever that bit is set. The analyzer does not surface binary group flag data anywhere, so the practical impact is limited.
+- **Wide LTC (de-facto).** FF labels every frame; bit 58 is read as a third frame-tens bit so FF can reach 79. The field-mark flag stays static. Used by several sound-recorder vendors (Tentacle, Ambient, some Sound Devices firmwares).
+- **Frame-pair (spec-conformant ST 12-1 §12).** FF labels frame *pairs* (wraps at 24 for 50, 29 for 60), bit 58 is BGF1, and the per-field LSB rides in the field-mark flag, which toggles every frame. The analyzer reconstructs the true frame number as `FF_pair × 2 + field-mark`.
+
+`MultiRateDecoder` classifies the source from the field-mark toggle pattern (`fieldMarkBehavior()`: TOGGLING → frame-pair, STATIC → wide) and decodes accordingly — so a conformant frame-pair source reads its true count instead of repeating each FF and throwing a continuity break every other frame. The **FIELD-MARK** readout in the UI shows which convention is in use. Caveat: a generator that puts the extra frame-tens MSB on a *different* bit (some use bit 35) will still mis-decode at FF≥40 in wide mode.
 
 **Sync word** (bits 64–79): `0011111111111101`  
 This 16-bit pattern is unique — it cannot occur in valid BCD timecode data or in the biphase encoding of any other legal bit sequence, which allows the decoder to frame-align reliably.
@@ -247,8 +251,10 @@ Five error conditions are monitored and displayed as illuminated badges:
 | LOW | Amber | Signal < −30 dBFS | Level slider below −30 dBFS |
 | DROPOUT | Pink | Signal < −60 dBFS | Level slider below −60 dBFS or random dropout roll |
 | NOISE | Purple | Not emitted in live mode | Noise slider above 15% |
+| DF_INVALID | Amber | A fresh frame asserts the DF flag but its FF lands where a DF count would have skipped (non-tenth-minute boundary) — the bit-10 flag is inconsistent with the count | Not emitted |
+| AUDIO_GAP | Cyan | The capture worklet reported audio-thread starvation (a `process()` gap > 2.5× the quantum) within the last 2 s — a capture-side glitch, distinct from low signal | Not emitted |
 
-In live mode the CLIP/HOT/LOW/DROPOUT tags come exclusively from real level measurements. NOISE is only active in simulation mode; in live mode signal quality is indicated by the SNR and THD gauges and the BIT ERRORS counter. When any error badge is active, the main timecode display turns red.
+In live mode the CLIP/HOT/LOW/DROPOUT tags come exclusively from real level measurements; DF_INVALID and AUDIO_GAP come from the decoded frame and the worklet respectively. NOISE is only active in simulation mode; in live mode signal quality is indicated by the SNR and THD gauges and the BIT ERRORS counter. When any error badge is active, the main timecode display turns red.
 
 ---
 
@@ -293,6 +299,7 @@ The AUDIO INPUT panel accepts audio files via drag-and-drop anywhere on the pane
 Key properties:
 - The file is **never connected to `ctx.destination`** — it is silent on the system output (ANALYSIS ONLY · NO OUTPUT).
 - For WAV files, the native sample rate from the file header is displayed alongside the context's resampled rate (Web Audio always resamples to the context's rate on decode).
+- **Multi-channel files: the LTC channel is auto-detected on load.** Production files often carry LTC on one channel and program audio (dialog/music) on the others. The analyzer probes each channel through the decoder (`detectLtcChannel`) and selects the one that actually decodes LTC, instead of letting Web Audio down-mix them together. The auto-selected channel is marked with a green **AUTO** badge; the **CH** picker still lets you override.
 - The decoder is fed by a deterministic, software-paced sample feeder (`startPacedDecoderFeed`) rather than the worklet path used for live input. Headless audio graphs deliver buffer-source samples in deferred bursts, which would otherwise contaminate the wall-clock LSQ classifier's per-frame timing.
 - Session log entries from file analysis are tagged `file` (distinct from `live` and `sim`).
 - The status label reads `FILE filename · Xs · LOOPED · ANALYSIS ONLY · NO OUTPUT` while a file is playing.
@@ -334,3 +341,5 @@ Released under the [MIT License](LICENSE) © 2026 Sean Green. You are free to us
 | 1.2 | 2026-05-12 | File-drop analysis path; `wireSourceToDecoder()` shared between mic and file paths; WAV native rate display; real SNR/THD/noise-floor via `computeLtcSpectralMetrics()`; EMA smoothing on gauges; clock drift/chase indicator; fractional rate detection (29.97 NDF / 23.976 / 59.94 NDF); frame-span sanity check; biphase tolerance tightened ±25% → ±15%; rate label color-coded (DF orange / NDF blue); B612 Mono timecode font; mobile responsive CSS; NOISE error tag removed from live mode |
 | 1.3 | 2026-05-12 | Continuity detection (REPEAT / JUMP / REWIND break types, per-frame queue drain, 500 ms gap reset); dropout rate (2-second rolling window, CLEAN / OCCASIONAL / FREQUENT / SEVERE); drift uses mean of recentFrameSpans (not median) for sub-sample precision; recentFrameSpans cap raised 30 → 120 frames; lock indicator and LOCKED banner changed from cyan to green (`#00ff88`); 47.95 and 48 fps removed from SMPTE_RATES; ST 12-2 references removed; app header updated to `ST 12-1:2014 COMPLIANT · LTC`; file status label changed to `ANALYSIS ONLY · NO OUTPUT`; `{type:"continuity"}` API publisher message |
 | 1.4 | 2026-05-25 | Carrier rate and counting cadence split into independent observations (`CadenceDetector` in its own module); measurement-grade wall-clock LSQ carrier classifier (worklet stamps `performance.now()` at chunk boundaries; LSQ regression over 20 s stable + 3 s detector windows; 5σ + 3-agreements commit and divergence rules; MEASURING state in UI); HFR frame layout support (FF up to 79 via bit 58 as frame-tens MSB, wide-LTC convention); `carrierCadenceMismatch()` raises high-confidence NON-CONFORMANT warning for off-spec sources (e.g. integer-30 carrier with DF count); AUDIT panel exposes raw measurement numbers; two drift readouts (source → host quartz primary, source → ADC diagnostic, CAPTURE CLOCK ERROR cross-check); LOCK_ACQUIRED log entries (5 s sustained requirement); file analysis uses deterministic software-paced decoder feeder; session log SRC column distinguishes `file` from `live`; session log timestamps in 24-hour; FRAME INTEGRITY grid marks DF flag (bit 10) with a `D` glyph; SMPTE SPEC REFERENCE panel documents every reported quantity; `ltcSynth.js` with independent carrier and cadence knobs; Vitest unit-test suite (55 tests) covering the new classifier. Closes #1 (30 DF detection) and #29 (measurement-grade carrier classification) |
+| 1.5 | 2026-05-30 | Count-only error-reset button (zeroes the error tally without clearing the session log); headless `test/manual/` tc-test harness that verifies the TESTING.md test files through the real decoder; audio-clock → host offset tracking with periodic `getOutputTimestamp()` resample + EMA, so a one-shot offset taken while the main thread was busy can no longer push `lf.t` past the 200 ms freshness gate (#56) |
+| 1.6 | 2026-05-31 | Spec-conformant ST 12-1 §12 **frame-pair decode** at 50/60 (field-mark flag carries the per-field LSB; true frame reconstructed as `FF_pair×2 + field-mark`; convention auto-selected from the field-mark toggle pattern; `ltcSynth` can generate both conventions) — closes #34; **auto-detect the LTC channel** on multi-channel file load (`detectLtcChannel`, with a manual CH override and AUTO badge) — closes #32; carrier classification **survives tab backgrounding** (signal-loss hold keys off frame delivery recency, not stamped time, so a backgrounding burst no longer drops the rate to MEASURING) — #51; **sample-rate readout no longer double-counts** (StrictMode-/race-safe audio setup stops a duplicate dev-mode capture worklet that read ~2× and falsely flagged RESAMPLED) |
