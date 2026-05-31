@@ -390,10 +390,17 @@ export class MultiRateDecoder {
     this._divergenceSide = null;
     this._divergenceCount = 0;
     this._lastDivergenceT = 0;
-    // Signal-loss hold. _lastFreshT is the wall-clock time of the most recent
-    // decoded frame (winner). When code stops, we keep showing the committed
-    // classification for 5 s, then drop to MEASURING.
+    // Signal-loss hold. _lastFreshT is the *stamped* wall-clock time of the most
+    // recent decoded frame (winner), used by drift/stamp-domain consumers.
     this._lastFreshT = 0;
+    // _lastDeliveryT is performance.now() at the moment a NEW winner frame was
+    // last observed — i.e. when the decoder was actually *handed* a frame. The
+    // hold keys off this, not _lastFreshT, so that a tab-backgrounding burst
+    // (frames delivered late but continuously, stamped up to 30 s ago) does not
+    // look stale and wrongly expire the commit. Genuine signal loss stops
+    // deliveries, so _lastDeliveryT freezes and the hold expires as before (#51).
+    this._lastDeliveryT = 0;
+    this._lastSeenFrame = null;             // identity of the last winner frame observed
     this._holdStartT = 0;                   // 0 when not in hold; set on first stale tick
     // performance.now() resolution probe (clamped lower bound on measurement
     // uncertainty). Some deployment contexts (cross-origin isolation off on
@@ -692,7 +699,17 @@ export class MultiRateDecoder {
       const times = winner.dec.recentDecodeTimes;
       stable   = this._lsqFps(times, now - 20000, now, fps);
       detector = this._lsqFps(times, now -  3000, now, fps);
-      if (winner.dec.lastFrame) this._lastFreshT = winner.dec.lastFrame.t;
+      if (winner.dec.lastFrame) {
+        this._lastFreshT = winner.dec.lastFrame.t;
+        // A new frame object means the decoder was just handed a frame. Stamp
+        // delivery in the performance.now() domain so the hold measures "how
+        // long since we were fed a frame", independent of the frame's own
+        // (possibly stale) wall-time. See _lastDeliveryT comment in reset().
+        if (winner.dec.lastFrame !== this._lastSeenFrame) {
+          this._lastSeenFrame = winner.dec.lastFrame;
+          this._lastDeliveryT = now;
+        }
+      }
     }
     // Side computation: which half of the integer/fractional decision space
     // does the stable estimate sit in, with 5σ confidence?
@@ -820,12 +837,16 @@ export class MultiRateDecoder {
       this._divergenceSide = null;
       this._divergenceCount = 0;
     }
-    // Signal-loss hold. If the most recent frame is older than 500 ms, we're
-    // in a stale state. Hold the committed classification for up to 5 s after
-    // the last fresh frame; then clear.
-    const stale = !winner || (now - this._lastFreshT > 500);
+    // Signal-loss hold. Stale = we haven't been *delivered* a frame in 500 ms
+    // of real time (_lastDeliveryT, not the frame's stamped time). Keying off
+    // delivery is what makes a tab-backgrounding burst survive: on tab-return
+    // the queued chunks drain continuously, so deliveries are current even
+    // though each frame's stamp is up to 30 s old — the commit must not expire
+    // (#51). True signal loss freezes deliveries, so this still trips at 500 ms
+    // and clears the commit 5 s later, as before.
+    const stale = !winner || (now - this._lastDeliveryT > 500);
     if (stale && this._committedFractional != null) {
-      if (this._holdStartT === 0) this._holdStartT = this._lastFreshT;
+      if (this._holdStartT === 0) this._holdStartT = this._lastDeliveryT;
       if (now - this._holdStartT > 5000) {
         this._committedFractional = null;
         this._committedNominalFps = null;
