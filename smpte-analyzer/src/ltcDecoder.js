@@ -49,6 +49,11 @@ export class LtcDecoder {
     this._chunkStartSampleIdx = 0;
     this._chunkLen = 0;
     this._wallClockMode = "synthetic"; // "stamped" if worklet supplied timestamps
+    // 50/60 fps FF interpretation: "wide" (FF labels every frame, bit 58 is a
+    // frame-tens MSB) or "framepair" (spec ST 12-1 §12: FF labels frame pairs,
+    // field-mark flag is the field LSB). MultiRateDecoder sets this on the
+    // 50/60 decoders from fieldMarkBehavior(). No effect at ≤30 fps. See #34.
+    this._frameMode = "wide";
   }
 
   feed(samples, sampleRate, nominalFps, chunkWallStart, chunkWallEnd) {
@@ -187,7 +192,7 @@ export class LtcDecoder {
     // 80-element allocation that buf.slice(n-80) would otherwise produce on
     // every successful sync match.
     const frameStart = n - 80;
-    const parsed = parseFrame(buf, this.nominalFps, frameStart);
+    const parsed = parseFrame(buf, this.nominalFps, frameStart, this._frameMode);
     // FF must fit the candidate's cadence: an LTC frame at 24-cadence wraps
     // at FF=24, at 30-cadence FF=30, etc. parseFrame's own bound is just the
     // 6-bit field width (FF≤79); without this cadence check a single-bit
@@ -248,23 +253,26 @@ export class LtcDecoder {
   }
 }
 
-export function parseFrame(b, nominalFps, start = 0) {
+export function parseFrame(b, nominalFps, start = 0, frameMode = "wide") {
   const o = start;
   const frUnits  = b[o+0]  | (b[o+1]<<1) | (b[o+2]<<2) | (b[o+3]<<3);
-  // Frame-tens field: standard LTC uses 2 bits (max FF=39, enough for ≤30
-  // fps). At 50/60 fps we extend it to 3 bits by reading bit 58 as a
-  // frame-tens MSB (max FF=79), matching the de-facto "wide LTC" convention
-  // used by many sound recorders / slates (Tentacle, Ambient, some Sound
-  // Devices firmwares).
+  // 50/60 fps has two encodings (issue #34), selected by `frameMode`:
   //
-  // NOTE — this is a de facto convention, not the standard scheme for
-  // 48/50/60 fps. The standard uses a frame-pair count (FF wraps at 24 or
-  // 29) plus a field-mark flag. See issue #34.
+  //   "wide" (default) — de-facto convention (Tentacle, Ambient, some Sound
+  //     Devices firmwares). FF labels every frame; frame-tens is extended to
+  //     3 bits by reading bit 58 as the MSB (max FF=79). One word per frame.
   //
-  // We only consult bit 58 when the candidate rate is 50/60 — otherwise a
-  // generator that sets bit 58 for binary-group purposes at ≤30 fps would
-  // be miscoded as FF+40.
-  const useHfrTens = nominalFps != null && nominalFps >= 50;
+  //   "framepair" — spec-conformant ST 12-1 §12. FF labels frame *pairs*
+  //     (2-bit tens, wraps at 24/29), bit 58 is BGF1, and the per-field LSB
+  //     rides in the field-mark flag (bit 27 at 60, bit 59 at 50). The true
+  //     frame number is reconstructed below as FF_pair*2 + field-mark.
+  //
+  // MultiRateDecoder picks the mode from fieldMarkBehavior() (a TOGGLING flag
+  // ⇒ framepair, STATIC ⇒ wide) and sets it on the 50/60 decoders. We only
+  // consult bit 58 as a frame-tens MSB in wide mode at 50/60 — at ≤30 fps it
+  // is BGF1, and in framepair mode it is BGF1 too.
+  const framePair = frameMode === "framepair" && (nominalFps === 50 || nominalFps === 60);
+  const useHfrTens = !framePair && nominalFps != null && nominalFps >= 50;
   const frTens   = b[o+8] | (b[o+9]<<1) | (useHfrTens ? (b[o+58]<<2) : 0);
   // Drop-frame flag (bit 10) is meaningful only at 30/60-frame counting;
   // color-frame flag (bit 11) is unused at 24-frame. Suppress both outside
@@ -289,34 +297,38 @@ export function parseFrame(b, nominalFps, start = 0) {
   // secTens=0 → ss=10 looks legal but is invalid BCD).
   if (frUnits > 9 || secUnits > 9 || minUnits > 9 || hrUnits > 9) return null;
   if (secTens > 5 || minTens > 5 || hrTens > 2) return null;
-  const ff = frTens * 10 + frUnits;
+  // Field-mark flag at 50/60 fps. A spec-conformant frame-pair source toggles
+  // this bit every frame; a wide-LTC source (#34) leaves it static.
+  // MultiRateDecoder.fieldMarkBehavior() derives the source's convention from
+  // the toggle pattern. See #40 for the bit-27/59 dual semantics at lower
+  // cadences. Computed before FF because framepair reconstruction needs it.
+  let fieldMark = null;
+  if (nominalFps === 60) fieldMark = b[o+27] === 1;
+  else if (nominalFps === 50) fieldMark = b[o+59] === 1;
+  // FF: in framepair mode frTens*10+frUnits is the pair number; the true
+  // frame is pair*2 + field-mark LSB. In wide mode FF is read directly.
+  const ff = framePair
+    ? (frTens * 10 + frUnits) * 2 + (fieldMark ? 1 : 0)
+    : frTens * 10 + frUnits;
   const ss = secTens * 10 + secUnits;
   const mm = minTens * 10 + minUnits;
   const hh = hrTens * 10 + hrUnits;
   if (ff > 79 || ss > 59 || mm > 59 || hh > 23) return null;
-  // Field-mark flag at 50/60 fps. A spec-conformant frame-pair source will
-  // toggle this bit every frame; a wide-LTC source (#34) will leave it
-  // static. MultiRateDecoder.fieldMarkBehavior() derives the source's
-  // labelling convention from the toggle pattern. See #40 for the bit-27/59
-  // dual semantics at lower cadences.
-  let fieldMark = null;
-  if (nominalFps === 60) fieldMark = b[o+27] === 1;
-  else if (nominalFps === 50) fieldMark = b[o+59] === 1;
   // Binary-group flag bits (BGF0/1/2). Positions are rate-dependent; the
   // combination identifies the user-bit encoding (e.g. ST 309 date/timezone).
-  // At 50/60 fps under our wide-LTC deviation (#34) bit 58 is repurposed as
-  // the frame-tens MSB, so BGF1 is reported as null at those cadences — when
-  // FF<40 it would coincidentally read 0, but we cannot disambiguate
-  // "BGF1=0" from "frame-tens MSB=0".
+  // At 50/60 fps in wide mode (#34) bit 58 is repurposed as the frame-tens
+  // MSB, so BGF1 is reported as null there — when FF<40 it would coincidentally
+  // read 0, but we cannot disambiguate "BGF1=0" from "frame-tens MSB=0". In
+  // framepair mode bit 58 is a genuine BGF1 and is reported.
   let bgf0 = null, bgf1 = null, bgf2 = null;
   if (nominalFps === 25 || nominalFps === 50) {
     bgf0 = b[o+27] === 1;
     bgf2 = b[o+43] === 1;
-    if (nominalFps === 25) bgf1 = b[o+58] === 1;
+    if (nominalFps === 25 || framePair) bgf1 = b[o+58] === 1;
   } else if (nominalFps === 24 || nominalFps === 30 || nominalFps === 60) {
     bgf0 = b[o+43] === 1;
     bgf2 = b[o+59] === 1;
-    if (nominalFps === 24 || nominalFps === 30) bgf1 = b[o+58] === 1;
+    if (nominalFps === 24 || nominalFps === 30 || framePair) bgf1 = b[o+58] === 1;
   }
   // User bits: eight 4-bit groups, each read LSB-first within the group,
   // returned in transmission order (UB1 first). The semantic interpretation
@@ -491,6 +503,30 @@ export class MultiRateDecoder {
       }
     } else {
       this._recentFieldMarks = [];
+    }
+    // 50/60 fps frame-mode selection (#34). A TOGGLING field-mark flag means
+    // the source is spec-conformant frame-pair LTC (FF labels pairs, flag is
+    // the field LSB); STATIC means de-facto wide LTC (FF labels every frame).
+    // Switch the 50/60 decoders' FF interpretation so a frame-pair source
+    // decodes to the true frame count instead of reading each pair twice and
+    // throwing a REPEAT continuity break every other frame.
+    if (winner && (winner.fps === 50 || winner.fps === 60)) {
+      const fmb = this.fieldMarkBehavior();
+      const mode = fmb === "TOGGLING" ? "framepair" : fmb === "STATIC" ? "wide" : null;
+      if (mode) {
+        for (const { fps, dec } of this.decoders) {
+          if ((fps === 50 || fps === 60) && dec._frameMode !== mode) {
+            dec._frameMode = mode;
+            // FF semantics just changed — frames decoded before the flip were
+            // a misinterpretation. Clear cadence inference and the continuity
+            // counter so the brief wide-mode acquisition transient doesn't
+            // leave spurious REPEATs once we know the source is frame-pair.
+            this.cadenceDetector.reset();
+            this.cadenceDetector.continuityBreaks = 0;
+            this.cadenceDetector.lastBreak = null;
+          }
+        }
+      }
     }
     // Clear all candidates' queues — non-winners' decodes are discarded.
     for (const { dec } of this.decoders) dec.pendingFrames = [];
