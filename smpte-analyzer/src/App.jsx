@@ -2096,15 +2096,6 @@ export default function SMPTEAnalyzer() {
           <div style={{ fontSize:18, fontFamily:"'Share Tech Mono'", color:"#555" }}>
             {frameCount.toLocaleString()}
           </div>
-          <div style={{ display:"flex", alignItems:"center", justifyContent:"flex-end", gap:8 }}>
-            <div style={{ fontSize:11, color: errorCount > 0 ? "#ff5500" : "#333", letterSpacing:2 }}>
-              {errorCount} ERRORS
-            </div>
-            <button onClick={clearErrorCount} disabled={errorCount === 0} style={{
-              ...buttonStyle(errorCount === 0 ? "#333" : "#ff3b3b", { padding:"3px 10px", fontSize:10 }),
-              opacity: errorCount === 0 ? 0.4 : 1,
-            }}>✕ CLEAR</button>
-          </div>
         </div>
       </div>
 
@@ -2267,8 +2258,19 @@ export default function SMPTEAnalyzer() {
             count={errorCounts[e]}
           />
         ))}
-        <div style={{ marginLeft:"auto", fontSize:11, fontFamily:"monospace", color: hasErrors ? "#ff3b3b" : "#00ff88", alignSelf:"center", letterSpacing:2 }}>
-          {hasErrors ? `⚠ ${analysis.errors.join(" · ")} DETECTED` : "● ALL PARAMETERS NOMINAL"}
+        <div style={{ marginLeft:"auto", display:"flex", alignItems:"center", gap:18 }}>
+          <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+            <div style={{ fontSize:11, color: errorCount > 0 ? "#ff5500" : "#333", letterSpacing:2, fontFamily:"monospace" }}>
+              {errorCount} ERRORS
+            </div>
+            <button onClick={clearErrorCount} disabled={errorCount === 0} style={{
+              ...buttonStyle(errorCount === 0 ? "#333" : "#ff3b3b", { padding:"3px 10px", fontSize:10 }),
+              opacity: errorCount === 0 ? 0.4 : 1,
+            }}>CLEAR</button>
+          </div>
+          <div style={{ fontSize:11, fontFamily:"monospace", color: hasErrors ? "#ff3b3b" : "#00ff88", letterSpacing:2 }}>
+            {hasErrors ? `⚠ ${analysis.errors.join(" · ")} DETECTED` : "● ALL PARAMETERS NOMINAL"}
+          </div>
         </div>
       </div>
 
