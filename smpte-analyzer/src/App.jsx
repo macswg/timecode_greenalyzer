@@ -794,6 +794,7 @@ export default function SMPTEAnalyzer() {
   const [audioCollapsed, setAudioCollapsed] = useState(false);
   const [apiCollapsed, setApiCollapsed] = useState(false);
   const [liveStatusCollapsed, setLiveStatusCollapsed] = useState(false);
+  const [sessionLogCollapsed, setSessionLogCollapsed] = useState(false);
   const [measuredSampleRate, setMeasuredSampleRate] = useState(null);
   // The current device's reported native rate (track.getSettings().sampleRate).
   // Unlike the reused AudioContext's fixed rate, this updates per input.
@@ -2329,7 +2330,7 @@ export default function SMPTEAnalyzer() {
 
       {/* Audio input (left) + Live status / sim controls (right) */}
       <div className="two-col" style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:12, alignItems:"stretch" }}>
-        {/* Left column: Audio input on top, API publisher below */}
+        {/* Left column: Audio input (API publisher moved below the session log) */}
         <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
         {/* Audio input */}
         <div
@@ -2481,54 +2482,12 @@ export default function SMPTEAnalyzer() {
           </>)}
         </div>
 
-        {/* API publisher (below audio input in left column) */}
-        <div className="api-row" style={{ ...PANEL, padding:12, display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
-          <div
-            onClick={() => setApiCollapsed(c => !c)}
-            style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer", userSelect:"none" }}
-            title={apiCollapsed ? "Expand" : "Collapse"}
-          >
-            <span style={{ fontSize:16, lineHeight:1, color:"#888", width:16, textAlign:"center" }}>{apiCollapsed ? "▸" : "▾"}</span>
-            <span style={{ fontSize:11, color:"#ff9900", letterSpacing:3 }}>API PUBLISHER</span>
-          </div>
-          {apiCollapsed && (
-            <div style={{ fontSize:11, fontFamily:"monospace", letterSpacing:2,
-              color: apiState === "open" ? "#00ff88" : apiState === "connecting" ? "#ff9900" : apiState === "closed" ? "#ff3b3b" : "#444" }}>
-              {apiState === "open" ? `● CONNECTED · ${apiSubscribers} SUB${apiSubscribers === 1 ? "" : "S"}`
-                : apiState === "connecting" ? "◐ CONNECTING…"
-                : apiState === "closed" ? "○ RECONNECTING…"
-                : "○ OFFLINE"}
-            </div>
-          )}
-          {!apiCollapsed && (<>
-          <input
-            className="tc-input-wide"
-            type="text" value={apiUrl} onChange={e => setApiUrl(e.target.value)}
-            disabled={apiEnabled}
-            style={{ background:"#0a0a0a", border:"1px solid #222", color:"#00ff88",
-                     fontFamily:"monospace", fontSize:12, padding:"4px 8px",
-                     minWidth:180, flex:1, outline:"none", opacity: apiEnabled ? 0.5 : 1 }}
-          />
-          {!apiEnabled ? (
-            <button onClick={() => setApiEnabled(true)} style={buttonStyle("#00ff88")}>▶ PUBLISH</button>
-          ) : (
-            <button onClick={() => setApiEnabled(false)} style={buttonStyle("#ff3b3b")}>■ STOP</button>
-          )}
-          <div style={{ fontSize:11, fontFamily:"monospace", letterSpacing:2,
-            color: apiState === "open" ? "#00ff88" : apiState === "connecting" ? "#ff9900" : apiState === "closed" ? "#ff3b3b" : "#333" }}>
-            {apiState === "open" ? `● CONNECTED · ${apiSubscribers} SUB${apiSubscribers === 1 ? "" : "S"}`
-              : apiState === "connecting" ? "◐ CONNECTING…"
-              : apiState === "closed" ? "○ RECONNECTING…"
-              : "○ OFFLINE"}
-          </div>
-          </>)}
-        </div>
         </div>
 
         {/* Controls / status */}
-        <div>
+        <div style={{ display:"flex", flexDirection:"column" }}>
         {bootstrapping ? (
-          <div style={{ ...PANEL, padding:14, display:"flex", flexDirection:"column", gap:10 }}>
+          <div style={{ ...PANEL, flex:1, padding:14, display:"flex", flexDirection:"column", gap:10 }}>
             <div style={{ fontSize:11, color:"#666", letterSpacing:3, marginBottom:4 }}>STARTING</div>
             <div style={{ fontSize:12, color:"#444", fontFamily:"monospace" }}>
               Requesting audio input. The simulator and live controls will
@@ -2536,7 +2495,7 @@ export default function SMPTEAnalyzer() {
             </div>
           </div>
         ) : liveMode ? (
-          <div style={{ ...PANEL, padding:14, display:"flex", flexDirection:"column", gap:14 }}>
+          <div style={{ ...PANEL, flex:1, padding: liveStatusCollapsed ? 12 : 14, display:"flex", flexDirection:"column", gap:14 }}>
             {synthing && (
               <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8, padding:"6px 10px", background:"#3b9cff11", border:"1px solid #3b9cff44" }}>
                 <div style={{ fontSize:10, color:"#3b9cff", letterSpacing:2, fontFamily:"monospace" }}>
@@ -2552,7 +2511,7 @@ export default function SMPTEAnalyzer() {
             )}
             <div
               onClick={() => setLiveStatusCollapsed(c => !c)}
-              style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer", userSelect:"none", marginBottom:4 }}
+              style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer", userSelect:"none", marginBottom: liveStatusCollapsed ? 0 : 4 }}
               title={liveStatusCollapsed ? "Expand" : "Collapse"}
             >
               <span style={{ fontSize:16, lineHeight:1, color:"#888", width:16, textAlign:"center" }}>{liveStatusCollapsed ? "▸" : "▾"}</span>
@@ -2769,7 +2728,7 @@ export default function SMPTEAnalyzer() {
             </>)}
           </div>
         ) : (
-        <div style={{ ...PANEL, padding:14, display:"flex", flexDirection:"column", gap:14, border:"1px solid #c084fc", boxShadow:"0 0 12px rgba(192,132,252,0.35)" }}>
+        <div style={{ ...PANEL, flex:1, padding:14, display:"flex", flexDirection:"column", gap:14, border:"1px solid #c084fc", boxShadow:"0 0 12px rgba(192,132,252,0.35)" }}>
           <div style={{ fontSize:11, color:"#c084fc", letterSpacing:3, marginBottom:4 }}>SIMULATION CONTROLS</div>
 
           <div>
@@ -2929,8 +2888,15 @@ export default function SMPTEAnalyzer() {
 
       {/* Session log */}
       <div style={{ marginTop:12, ...PANEL }}>
-        <div className="session-toolbar" style={{ display:"flex", alignItems:"center", gap:12, padding:"10px 12px", borderBottom:"1px solid #1a1a1a", flexWrap:"wrap" }}>
-          <div style={{ fontSize:11, color:"#ff9900", letterSpacing:3 }}>SESSION LOG</div>
+        <div className="session-toolbar" style={{ display:"flex", alignItems:"center", gap:12, padding:"10px 12px", borderBottom: sessionLogCollapsed ? "none" : "1px solid #1a1a1a", flexWrap:"wrap" }}>
+          <div
+            onClick={() => setSessionLogCollapsed(c => !c)}
+            style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer", userSelect:"none" }}
+            title={sessionLogCollapsed ? "Expand" : "Collapse"}
+          >
+            <span style={{ fontSize:16, lineHeight:1, color:"#888", width:16, textAlign:"center" }}>{sessionLogCollapsed ? "▸" : "▾"}</span>
+            <span style={{ fontSize:11, color:"#ff9900", letterSpacing:3 }}>SESSION LOG</span>
+          </div>
           <div style={{ fontSize:11, color:"#555", letterSpacing:2 }}>
             {sessionLog.length} ENTR{sessionLog.length === 1 ? "Y" : "IES"} · {errorCount} ERROR TICKS · {frameCount} FRAMES
           </div>
@@ -2950,6 +2916,7 @@ export default function SMPTEAnalyzer() {
             })}
           </div>
         </div>
+        {!sessionLogCollapsed && (
         <div style={{ maxHeight:440, overflowY:"auto", fontFamily:"monospace", fontSize:12 }}>
           {sessionLog.length === 0 ? (
             <div style={{ padding:16, color:"#333", textAlign:"center", letterSpacing:2, fontSize:11 }}>
@@ -3004,6 +2971,50 @@ export default function SMPTEAnalyzer() {
             </table>
           )}
         </div>
+        )}
+      </div>
+
+      {/* API publisher (below the session log) */}
+      <div className="api-row" style={{ marginTop:12, ...PANEL, padding:12, display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
+        <div
+          onClick={() => setApiCollapsed(c => !c)}
+          style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer", userSelect:"none" }}
+          title={apiCollapsed ? "Expand" : "Collapse"}
+        >
+          <span style={{ fontSize:16, lineHeight:1, color:"#888", width:16, textAlign:"center" }}>{apiCollapsed ? "▸" : "▾"}</span>
+          <span style={{ fontSize:11, color:"#ff9900", letterSpacing:3 }}>API PUBLISHER</span>
+        </div>
+        {apiCollapsed && (
+          <div style={{ fontSize:11, fontFamily:"monospace", letterSpacing:2,
+            color: apiState === "open" ? "#00ff88" : apiState === "connecting" ? "#ff9900" : apiState === "closed" ? "#ff3b3b" : "#444" }}>
+            {apiState === "open" ? `● CONNECTED · ${apiSubscribers} SUB${apiSubscribers === 1 ? "" : "S"}`
+              : apiState === "connecting" ? "◐ CONNECTING…"
+              : apiState === "closed" ? "○ RECONNECTING…"
+              : "○ OFFLINE"}
+          </div>
+        )}
+        {!apiCollapsed && (<>
+        <input
+          className="tc-input-wide"
+          type="text" value={apiUrl} onChange={e => setApiUrl(e.target.value)}
+          disabled={apiEnabled}
+          style={{ background:"#0a0a0a", border:"1px solid #222", color:"#00ff88",
+                   fontFamily:"monospace", fontSize:12, padding:"4px 8px",
+                   minWidth:180, flex:1, outline:"none", opacity: apiEnabled ? 0.5 : 1 }}
+        />
+        {!apiEnabled ? (
+          <button onClick={() => setApiEnabled(true)} style={buttonStyle("#00ff88")}>▶ PUBLISH</button>
+        ) : (
+          <button onClick={() => setApiEnabled(false)} style={buttonStyle("#ff3b3b")}>■ STOP</button>
+        )}
+        <div style={{ fontSize:11, fontFamily:"monospace", letterSpacing:2,
+          color: apiState === "open" ? "#00ff88" : apiState === "connecting" ? "#ff9900" : apiState === "closed" ? "#ff3b3b" : "#333" }}>
+          {apiState === "open" ? `● CONNECTED · ${apiSubscribers} SUB${apiSubscribers === 1 ? "" : "S"}`
+            : apiState === "connecting" ? "◐ CONNECTING…"
+            : apiState === "closed" ? "○ RECONNECTING…"
+            : "○ OFFLINE"}
+        </div>
+        </>)}
       </div>
 
       {/* SMPTE Spec Reference — bottom of page */}
