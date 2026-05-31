@@ -767,6 +767,13 @@ export default function SMPTEAnalyzer() {
   const tickRef = useRef(null);
   const decoderRef = useRef(null);
   const workletNodeRef = useRef(null);
+  // Monotonic token guarding the async startAudioCapture() against races. Each
+  // call claims an epoch; if a newer call (or unmount cleanup) supersedes it
+  // while it's awaiting getUserMedia, the stale call bails before wiring a
+  // second capture worklet. Without this, React StrictMode's dev double-mount
+  // wired two `ltc-capture` worklets that both incremented sampleClockRef.n,
+  // doubling the measured sample rate (read ~96k on a 48k context).
+  const captureEpochRef = useRef(0);
   const sampleRateRef = useRef(48000);
   // Measured sample rate: the worklet forwards every sample, so counting them
   // against wall-clock time gives the *actual* delivery rate of the input —
@@ -1360,7 +1367,16 @@ export default function SMPTEAnalyzer() {
     startAudioCapture();
     const onChange = () => refreshAudioDevices();
     navigator.mediaDevices?.addEventListener?.("devicechange", onChange);
-    return () => navigator.mediaDevices?.removeEventListener?.("devicechange", onChange);
+    return () => {
+      navigator.mediaDevices?.removeEventListener?.("devicechange", onChange);
+      // Tear the audio graph down on unmount and invalidate any in-flight
+      // startAudioCapture(). Critical under React StrictMode's dev double-mount:
+      // without this, the first mount's capture worklet outlives cleanup and a
+      // second one is wired on re-mount, so both feed the sample counter and
+      // the measured rate reads ~2× (96k on a 48k context).
+      captureEpochRef.current++;
+      teardownCurrentSource();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1665,7 +1681,14 @@ export default function SMPTEAnalyzer() {
       bufferSourceRef.current = null;
     }
     if (sourceRef.current) { try { sourceRef.current.disconnect(); } catch {} sourceRef.current = null; }
-    if (workletNodeRef.current) { try { workletNodeRef.current.disconnect(); } catch {} workletNodeRef.current = null; }
+    if (workletNodeRef.current) {
+      // Detach the message handler before disconnecting so any sample chunk
+      // still queued from a superseded worklet can't reach the shared sample
+      // counter (would otherwise inflate the measured rate).
+      try { workletNodeRef.current.port.onmessage = null; } catch {}
+      try { workletNodeRef.current.disconnect(); } catch {}
+      workletNodeRef.current = null;
+    }
     if (splitterRef.current) { try { splitterRef.current.disconnect(); } catch {} splitterRef.current = null; }
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(t => t.stop());
@@ -1677,6 +1700,7 @@ export default function SMPTEAnalyzer() {
   }
 
   async function startAudioCapture(deviceId) {
+    const epoch = ++captureEpochRef.current;
     try {
       teardownCurrentSource();
       setPlayingFile(null);
@@ -1693,6 +1717,13 @@ export default function SMPTEAnalyzer() {
         },
       };
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      // Superseded while awaiting (newer capture started, or unmount). Drop this
+      // stream and bail before wiring a worklet, or we'd leave a second
+      // capture graph feeding the shared sample counter.
+      if (captureEpochRef.current !== epoch) {
+        stream.getTracks().forEach(t => t.stop());
+        return;
+      }
       streamRef.current = stream;
       const track = stream.getAudioTracks()[0];
       const settings = track?.getSettings?.() || {};
@@ -1702,6 +1733,10 @@ export default function SMPTEAnalyzer() {
       refreshAudioDevices();
 
       const ctx = await getOrCreateAudioContext();
+      if (captureEpochRef.current !== epoch) {
+        stream.getTracks().forEach(t => t.stop());
+        return;
+      }
       const source = ctx.createMediaStreamSource(stream);
       const { analyser, worklet } = wireSourceToDecoder(ctx, source, settings.channelCount);
 
