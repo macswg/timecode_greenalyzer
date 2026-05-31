@@ -3,6 +3,7 @@ import { Publisher } from "./publisher";
 import { MultiRateDecoder, rateKeyToNominalFps, tcString } from "./ltcDecoder";
 import { framesToTc, isValidDropFrame } from "./dropFrame";
 import { buildLtcAudioBuffer } from "./ltcSynth";
+import { detectLtcChannel } from "./channelDetect";
 
 // Carrier rates the synthesizer can emit. Independent of counting cadence.
 const SYNTH_CARRIER_RATES = {
@@ -803,6 +804,10 @@ export default function SMPTEAnalyzer() {
   // async paths) reads the latest value without a stale closure.
   const [inputChannelCount, setInputChannelCount] = useState(1);
   const [selectedChannel, setSelectedChannel] = useState(LTC_CHANNEL);
+  // Channel index auto-selected by LTC detection on the last multi-channel file
+  // load (#32), or null if mono / no detection / user has since overridden.
+  // Drives the "AUTO" badge next to the CH picker.
+  const [channelAutoDetected, setChannelAutoDetected] = useState(null);
   const selectedChannelRef = useRef(LTC_CHANNEL);
   const splitterRef = useRef(null);
   const streamRef = useRef(null);
@@ -1629,6 +1634,7 @@ export default function SMPTEAnalyzer() {
   function selectInputChannel(idx) {
     selectedChannelRef.current = idx;
     setSelectedChannel(idx);
+    setChannelAutoDetected(null); // manual override — drop the AUTO badge
     const sp = splitterRef.current;
     const an = analyserRef.current;
     const wk = workletNodeRef.current;
@@ -1735,6 +1741,22 @@ export default function SMPTEAnalyzer() {
       const fileNativeRate = readWavSampleRate(arrayBuf);
 
       const audioBuffer = await ctx.decodeAudioData(arrayBuf);
+
+      // Auto-detect which channel carries LTC. Multi-channel files commonly
+      // have LTC on one channel and program audio (dialog/music) on the
+      // others; selecting the wrong channel buries the code. Probe each
+      // channel and pick the one that actually decodes LTC. The CH dropdown
+      // still lets the user override afterwards. (#32)
+      let autoCh = null;
+      if (audioBuffer.numberOfChannels > 1) {
+        const det = detectLtcChannel(audioBuffer, ctx.sampleRate);
+        if (det.score > 0) {
+          autoCh = det.channel;
+          selectedChannelRef.current = det.channel;
+          setSelectedChannel(det.channel);
+        }
+      }
+      setChannelAutoDetected(autoCh);
 
       teardownCurrentSource();
       setCurrentDeviceId(null);
@@ -2332,6 +2354,13 @@ export default function SMPTEAnalyzer() {
                     <span style={{ fontSize:11, color:"#555", letterSpacing:1 }}>
                       of {inputChannelCount}
                     </span>
+                    {channelAutoDetected != null && channelAutoDetected === selectedChannel && (
+                      <span
+                        title="LTC auto-detected on this channel — pick another to override"
+                        style={{ fontSize:10, color:"#00ff88", letterSpacing:1,
+                          border:"1px solid #00ff8855", borderRadius:2, padding:"1px 5px" }}
+                      >AUTO</span>
+                    )}
                   </>
                 )}
                 <div style={{ fontSize:11, color:"#00ff88", fontFamily:"monospace", letterSpacing:2 }}>
