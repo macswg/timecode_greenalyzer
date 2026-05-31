@@ -45,10 +45,16 @@ orange rate label; non-drop with `:` and blue, matching the analyzer.
 
 ## Message types
 
-- `{"type":"tc", t, seq, hh, mm, ss, ff, rate, dropFrame, source, levelDbFS, errors}`
+- `{"type":"tc", t, seq, hh, mm, ss, ff, rate, dropFrame, carrierRate, cadenceFps,
+  cadenceDropFrame, carrierCadenceMismatch, fieldMarkBehavior, bgf, userBits, source,
+  ltcLocked, frameValid, levelDbFS, peakDbFS, driftPpm, dropoutPct, snr, errors}`
   emitted every tick (~30 Hz). `seq` is a publisher-monotonic counter starting at 1.
-  `rate` is the SMPTE rate key string (e.g. `"29.97df"`); `dropFrame` is boolean.
-  Both rate fields are always present and explicit.
+  `rate` is the combined SMPTE rate key (e.g. `"29.97df"`); `dropFrame` is boolean.
+  `carrierRate` / `cadenceFps` / `cadenceDropFrame` are the independent carrier-rate
+  and counting-cadence observations (combined into `rate` for convenience).
+  `fieldMarkBehavior` is `"TOGGLING"` / `"STATIC"` / `null` (50/60 frame-pair vs
+  wide-LTC). `userBits` is an 8-char hex string (UB1..UB8). Fields with no value yet
+  (e.g. before the carrier classifier commits) are `null`.
 - `{"type":"error", t, seq, tc, rate, errors}` emitted once per error-set transition.
   `tc` is a formatted timecode string; `;` is used as the frame separator for drop-frame.
 - `{"type":"continuity", t, seq, breakType, delta, from, to, rate}` emitted when

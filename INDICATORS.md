@@ -162,6 +162,8 @@ randomness or sim slider defaults:
 | **LOW** | `lvl < −30 dBFS` | Level slider < −30 dBFS |
 | **DROPOUT** | `lvl < −60 dBFS` | Level slider < −60 dBFS or random dropout roll |
 | **NOISE** | **Not emitted in live mode** | Noise slider > 15% |
+| **DF_INVALID** | Fresh frame asserts the DF flag but its FF fails `isValidDropFrame()` (lands where a DF count would have skipped, at a non-tenth-minute boundary) — bit-10 flag inconsistent with the count | Not emitted |
+| **AUDIO_GAP** | Worklet reported a `process()` gap > 2.5× the quantum within the last 2 s (audio-thread starvation) — a capture-side glitch, distinct from low signal | Not emitted |
 
 In live mode NOISE is intentionally absent. Signal quality in live mode is
 reported by the SNR and THD gauges and the BIT ERRORS counter — a boolean
@@ -180,7 +182,7 @@ sim's purpose.
 | **FRAMES DECODED** | `MultiRateDecoder.framesDecoded` |
 | **BIT ERRORS** | `MultiRateDecoder.bitErrors` |
 | **INPUT LEVEL** | Shows `—` — `analysis.rmsDbFS` is not populated in the live path; the meters in SIGNAL LEVEL are the source of truth |
-| **SAMPLE RATE** | `audioContext.sampleRate` (Hz) for live mic input. When a file is playing: `{fileNativeRate} Hz file · {ctx.sampleRate} Hz decoded` — the native rate is parsed from the WAV RIFF header by `readWavSampleRate()`; non-WAV files show only the decoded rate |
+| **SAMPLE RATE** | Live mic: `{measured} Hz measured · {nominal} Hz nominal · RESAMPLED`. `measured` is the true sample-delivery rate counted from the capture worklet over wall-clock (ground truth — what's actually reaching the decoder); `nominal` is the device's declared rate (`getSettings().sampleRate`) and the `RESAMPLED` flag are shown only when the two disagree (the OS is resampling the input). When a file is playing: `{fileNativeRate} Hz file · {ctx.sampleRate} Hz decoded` — native parsed from the WAV RIFF header by `readWavSampleRate()`; non-WAV files show only the decoded rate |
 | **CLOCK DRIFT** | `MultiRateDecoder.driftPpmSourceVsHostQuartz()`, EMA-smoothed. Deviation of the source LTC clock from the host machine's quartz (derived from the wall-clock LSQ that drives carrier classification — immune to capture-device ADC bias). `—` until the classifier has committed. States: `<5 ppm LOCKED` (green) · `5–500 ppm OK TO CHASE` (cyan) · `>500 ppm CHECK RATE` (amber — large enough to imply a mis-detected rate). The host quartz is itself undisciplined (typically ±50 ppm absolute on consumer hardware), so this is drift relative to the host crystal, not absolute. A second drift readout (source → ADC) and the difference (CAPTURE CLOCK ERROR) live in the AUDIT panel. |
 | **DROPOUT RATE** | `MultiRateDecoder.dropoutPct(2)`, EMA-smoothed. Percentage of expected frames not decoded over a rolling 2-second window: `100 × (1 − decoded / (window_sec × detected_fps))`. `—` until the winner is established. States: `CLEAN` (<1%, green) · `OCCASIONAL` (1–10%, orange) · `FREQUENT` (10–50%, amber) · `SEVERE` (>50%, red) |
 | **CONTINUITY · 60s** | Count of frames in a **rolling 60-second window** where `HH:MM:SS:FF` did not advance by exactly one frame (drop-frame rules applied). Green `● CONTINUOUS · 0 BREAKS` when clean. Amber `N BREAKS · last: TYPE ±Δ @ HH:MM:SS:FF` when at least one break is in-window (the `last: …` detail is shown only when `lastBreak` itself is within the 60 s window). Break types — `REPEAT` (delta = 0, freeze frame), `JUMP` (delta > 1, edit splice / dropout), `REWIND` (delta < 0, rewind / freewheel reset). The full break history is still in the session log. Gaps ≥ 500 ms between decoded frames reset continuity *tracking* (not the counter) to avoid a spurious JUMP across the gap; gaps ≥ 3 s also clear the break counter on the resuming frame, on the basis that a long signal stop starts a new run. |
@@ -201,6 +203,9 @@ can audit the analyzer's conclusions instead of taking them on faith.
 | **SOURCE → HOST QUARTZ** | Same value as the LIVE INPUT STATUS CLOCK DRIFT row; shown again here for context next to the other drifts. Positive = source faster than host crystal |
 | **SOURCE → ADC** | `driftPpmSourceVsAdc()` — drift derived from the capture device's sample count instead of host time. Compares the source against whatever clock drives the audio interface's ADC |
 | **CAPTURE CLOCK ERROR** | `captureClockErrorPpm()` = host − ADC drift with the LTC source as the common reference. Row turns amber if magnitude exceeds 100 ppm — a healthy capture chain should agree within tens of ppm, so a large value suggests a faulty interface, an in-line sample rate converter, or a mislabeled file rate |
+| **FIELD-MARK** | `fieldMarkBehavior()` at 50/60 fps — `TOGGLING · frame-pair LTC` (green) when the field-mark flag (bit 27 @ 60, bit 59 @ 50) toggles every frame (spec ST 12-1 §12; the decoder reconstructs the true frame as `FF_pair×2 + field-mark`), `STATIC · wide LTC (de-facto)` (amber) when it doesn't (FF labels every frame, bit 58 as frame-tens MSB), or `—` outside 50/60 / while still gathering samples. The decoder follows this to pick its FF interpretation (#34) |
+| **USER BITS** | The eight 4-bit user-bit groups (UB1..UB8) of the last frame, as hex. `—` with no live frame. Raw bits only — semantic decoding (e.g. ST 309 date/time) is left to downstream consumers |
+| **BGF 0/1/2** | The three binary-group flag bits, whose positions are rate-dependent. BGF1 is `null` at 50/60 in wide mode (bit 58 is the frame-tens MSB there) but a real value in frame-pair mode |
 | **perf.now() RES** | Probed quantization of `performance.now()` on this browser / cross-origin-isolation context. Bounds the σ floor for the carrier classifier; 100 µs is typical, 1 ms means the browser is coarse-clamping clocks for Spectre mitigation |
 
 ---
@@ -211,6 +216,7 @@ The panel accepts drag-and-drop of audio files anywhere on its surface (cyan das
 
 **When in live mic mode:**
 - **DEVICE** dropdown — populated by `navigator.mediaDevices.enumerateDevices()`, filtered to `audioinput`. Selecting a different device tears down the previous stream and rebuilds the source + worklet on the same `AudioContext` (so the system output is not re-negotiated). Only shown in live mic mode (hidden while a file is playing).
+- **CH** dropdown — shown only for multi-channel inputs (and multi-channel files). Selects which channel is tapped for LTC; a `ChannelSplitter` taps that one channel at unity, avoiding Web Audio's default down-mix (which would sum program audio into the code and read ~6 dB low). For files the LTC channel is **auto-detected on load** (`detectLtcChannel` probes each channel through the decoder) and marked with a green **AUTO** badge; picking a different channel clears the badge (#32).
 - **● LIVE** indicator — active when a real mic stream is open.
 - **↻** button — refreshes the device list manually; the analyzer also listens for `devicechange` events.
 
