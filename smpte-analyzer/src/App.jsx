@@ -374,7 +374,7 @@ function Gauge({ label, value, min=0, max=100, unit="", thresholds=[] }) {
     ? thresholds.reduce((c, t) => value >= t.above ? t.color : c, "#00ff88")
     : "#333";
   return (
-    <div className="gauge" style={{ display:"flex", flexDirection:"column", gap:3 }}>
+    <div className="gauge" style={{ display:"flex", flexDirection:"column", gap:1 }}>
       <div className="gauge-header" style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline" }}>
         <span style={{ fontSize:11, color:"#666", fontFamily:"monospace", letterSpacing:2 }}>{label}</span>
         <span style={{ fontSize:13, color, fontFamily:"monospace" }}>
@@ -700,6 +700,7 @@ export default function SMPTEAnalyzer() {
   const [errorCount, setErrorCount] = useState(0);
   const [errorCounts, setErrorCounts] = useState({ CLIP:0, HOT:0, LOW:0, DROPOUT:0, NOISE:0, DF_INVALID:0, AUDIO_GAP:0 });
   const [sessionLog, setSessionLog] = useState([]);
+  const logIdRef = useRef(0);
   const audioCtxRef = useRef(null);
   // Offset (in ms) added to audio-clock-domain chunk stamps from the worklet
   // to translate them into main-thread performance.now() domain. Seeded on
@@ -789,6 +790,10 @@ export default function SMPTEAnalyzer() {
   const lastSeenCarrierRef = useRef(null);
   const lastSeenCadenceRef = useRef(null);
   const [auditExpanded, setAuditExpanded] = useState(false);
+  // Collapsible left-column / status sections (collapsed = hidden body, header only).
+  const [audioCollapsed, setAudioCollapsed] = useState(false);
+  const [apiCollapsed, setApiCollapsed] = useState(false);
+  const [liveStatusCollapsed, setLiveStatusCollapsed] = useState(false);
   const [measuredSampleRate, setMeasuredSampleRate] = useState(null);
   // The current device's reported native rate (track.getSettings().sampleRate).
   // Unlike the reused AudioContext's fixed rate, this updates per input.
@@ -854,10 +859,15 @@ export default function SMPTEAnalyzer() {
   }
 
   function pushLog(entry) {
+    const withId = entry.id == null ? { ...entry, id: ++logIdRef.current } : entry;
     setSessionLog(prev => {
       const next = prev.length >= LOG_CAP ? prev.slice(prev.length - LOG_CAP + 1) : prev;
-      return [...next, entry];
+      return [...next, withId];
     });
+  }
+  // Attach/replace an analyst note on a specific log entry (keyed by stable id).
+  function setLogNote(id, note) {
+    setSessionLog(prev => prev.map(e => (e.id === id ? { ...e, note } : e)));
   }
   // Update the most recent log entry's `count` (used to roll up repeated
   // ticks of the same error signature without flooding the log).
@@ -1926,9 +1936,14 @@ export default function SMPTEAnalyzer() {
   }
 
   function exportCSV() {
-    const header = "timestamp,timecode,from,rate,source,levelDbFS,snrDb,errors,count";
+    // Quote a field only when it contains a comma, quote, or newline (RFC 4180).
+    const csv = (v) => {
+      const s = String(v ?? "");
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const header = "timestamp,timecode,from,rate,source,levelDbFS,snrDb,errors,count,note";
     const rows = sessionLog.map(e =>
-      `${new Date(e.t).toISOString()},${e.tc},${e.from ?? ""},${e.rate},${e.source},${e.levelDbFS},${e.snr ?? ""},${e.errors.join("|")},${e.count ?? 1}`
+      `${new Date(e.t).toISOString()},${e.tc},${e.from ?? ""},${e.rate},${e.source},${e.levelDbFS},${e.snr ?? ""},${e.errors.join("|")},${e.count ?? 1},${csv(e.note)}`
     );
     downloadFile(`ltc-session-${Date.now()}.csv`, "text/csv", [header, ...rows].join("\n"));
   }
@@ -2109,18 +2124,6 @@ export default function SMPTEAnalyzer() {
           ▲ SIMULATING CODE
         </div>
       )}
-      {!bootstrapping && liveMode && (
-        <div style={{
-          fontSize:12, fontFamily:"monospace", letterSpacing:4,
-          color: ltcLocked ? "#00ff88" : "#888",
-          textShadow: ltcLocked ? "0 0 8px rgba(0,255,136,0.5)" : "none",
-          marginBottom:6,
-        }}>
-          {ltcLocked
-            ? "● LTC LOCKED"
-            : "○ NO LTC SIGNAL — feed valid LTC into the selected input"}
-        </div>
-      )}
       <div style={{
         border: !bootstrapping && simMode ? "1px solid #d946ef" : "1px solid #1a1a1a",
         boxShadow: !bootstrapping && simMode ? "0 0 16px rgba(217,70,239,0.25), inset 0 0 12px rgba(217,70,239,0.08)" : "none",
@@ -2272,13 +2275,17 @@ export default function SMPTEAnalyzer() {
           <div style={{ fontSize:11, color:"#ff9900", letterSpacing:3 }}>SIGNAL LEVEL</div>
           {/* RMS and PEAK share one identical dB scale; render it only under
               PEAK (the lower meter) to save a row. */}
-          <LevelMeter label="RMS" value={analysis?.levelDbFS ?? levelDbFS} showTicks={false} />
-          <LevelMeter label="PEAK" value={analysis?.peakDbFS ?? levelDbFS + 2} peak={peakHold} />
+          <div style={{ display:"flex", flexDirection:"column", gap:2 }}>
+            <LevelMeter label="RMS" value={analysis?.levelDbFS ?? levelDbFS} showTicks={false} />
+            <LevelMeter label="PEAK" value={analysis?.peakDbFS ?? levelDbFS + 2} peak={peakHold} />
+          </div>
           <div style={{ height:"1px", background:"#111" }} />
-          <Gauge label="SNR" value={analysis?.snr} min={0} max={80} unit=" dB"
-            thresholds={[{above:-100,color:"#ff3b3b"},{above:10,color:"#ffaa00"},{above:15,color:"#00ff88"}]} />
-          <Gauge label="THD" value={analysis?.thd} min={0} max={100} unit="%"
-            thresholds={[{above:0,color:"#00ff88"},{above:50,color:"#ffaa00"},{above:70,color:"#ff3b3b"}]} />
+          <div style={{ display:"flex", flexDirection:"column", gap:3 }}>
+            <Gauge label="SNR" value={analysis?.snr} min={0} max={80} unit=" dB"
+              thresholds={[{above:-100,color:"#ff3b3b"},{above:10,color:"#ffaa00"},{above:15,color:"#00ff88"}]} />
+            <Gauge label="THD" value={analysis?.thd} min={0} max={100} unit="%"
+              thresholds={[{above:0,color:"#00ff88"},{above:50,color:"#ffaa00"},{above:70,color:"#ff3b3b"}]} />
+          </div>
           <div style={{ fontSize:11, color:"#333", fontFamily:"monospace", lineHeight:1.4, marginTop:2 }}>
             NOISE FLOOR: {Number.isFinite(analysis?.noiseFloor)
               ? `${analysis.noiseFloor.toFixed(1)} dB`
@@ -2335,8 +2342,21 @@ export default function SMPTEAnalyzer() {
             if (f) startFilePlayback(f);
           }}
         >
+          <div
+            onClick={() => setAudioCollapsed(c => !c)}
+            style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer", userSelect:"none" }}
+            title={audioCollapsed ? "Expand" : "Collapse"}
+          >
+            <span style={{ fontSize:16, lineHeight:1, color:"#888", width:16, textAlign:"center" }}>{audioCollapsed ? "▸" : "▾"}</span>
+            <span style={{ fontSize:11, color:"#ff9900", letterSpacing:3 }}>AUDIO INPUT</span>
+            {audioCollapsed && (
+              <span style={{ fontSize:11, color:"#444", letterSpacing:2, fontFamily:"monospace" }}>
+                {playingFile ? `FILE · ${playingFile.name}` : liveMode ? (currentDeviceLabel || "● LIVE") : "○ SIMULATION MODE"}
+              </span>
+            )}
+          </div>
+          {!audioCollapsed && (<>
           <div className="audio-row" style={{ display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
-            <div style={{ fontSize:11, color:"#ff9900", letterSpacing:3 }}>AUDIO INPUT</div>
             {playingFile ? (
               <>
                 <div style={{ fontSize:11, color:"#22d3ee", letterSpacing:2 }}>FILE</div>
@@ -2455,11 +2475,29 @@ export default function SMPTEAnalyzer() {
               </button>
             </div>
           )}
+          </>)}
         </div>
 
         {/* API publisher (below audio input in left column) */}
         <div className="api-row" style={{ ...PANEL, padding:12, display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
-          <div style={{ fontSize:11, color:"#ff9900", letterSpacing:3 }}>API PUBLISHER</div>
+          <div
+            onClick={() => setApiCollapsed(c => !c)}
+            style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer", userSelect:"none" }}
+            title={apiCollapsed ? "Expand" : "Collapse"}
+          >
+            <span style={{ fontSize:16, lineHeight:1, color:"#888", width:16, textAlign:"center" }}>{apiCollapsed ? "▸" : "▾"}</span>
+            <span style={{ fontSize:11, color:"#ff9900", letterSpacing:3 }}>API PUBLISHER</span>
+          </div>
+          {apiCollapsed && (
+            <div style={{ fontSize:11, fontFamily:"monospace", letterSpacing:2,
+              color: apiState === "open" ? "#00ff88" : apiState === "connecting" ? "#ff9900" : apiState === "closed" ? "#ff3b3b" : "#444" }}>
+              {apiState === "open" ? `● CONNECTED · ${apiSubscribers} SUB${apiSubscribers === 1 ? "" : "S"}`
+                : apiState === "connecting" ? "◐ CONNECTING…"
+                : apiState === "closed" ? "○ RECONNECTING…"
+                : "○ OFFLINE"}
+            </div>
+          )}
+          {!apiCollapsed && (<>
           <input
             className="tc-input-wide"
             type="text" value={apiUrl} onChange={e => setApiUrl(e.target.value)}
@@ -2480,6 +2518,7 @@ export default function SMPTEAnalyzer() {
               : apiState === "closed" ? "○ RECONNECTING…"
               : "○ OFFLINE"}
           </div>
+          </>)}
         </div>
         </div>
 
@@ -2508,7 +2547,20 @@ export default function SMPTEAnalyzer() {
                 </button>
               </div>
             )}
-            <div style={{ fontSize:11, color:"#22d3ee", letterSpacing:3, marginBottom:4 }}>LIVE INPUT STATUS</div>
+            <div
+              onClick={() => setLiveStatusCollapsed(c => !c)}
+              style={{ display:"flex", alignItems:"center", gap:8, cursor:"pointer", userSelect:"none", marginBottom:4 }}
+              title={liveStatusCollapsed ? "Expand" : "Collapse"}
+            >
+              <span style={{ fontSize:16, lineHeight:1, color:"#888", width:16, textAlign:"center" }}>{liveStatusCollapsed ? "▸" : "▾"}</span>
+              <span style={{ fontSize:11, color:"#22d3ee", letterSpacing:3 }}>LIVE INPUT STATUS</span>
+              {liveStatusCollapsed && (
+                <span style={{ fontSize:11, fontFamily:"monospace", letterSpacing:2, color: ltcLocked ? "#00ff88" : "#888" }}>
+                  {ltcLocked ? "● LOCKED" : "○ NO SIGNAL"}
+                </span>
+              )}
+            </div>
+            {!liveStatusCollapsed && (<>
             <div style={{ display:"grid", gridTemplateColumns:"auto 1fr", gap:"10px 18px", fontSize:13, fontFamily:"monospace" }}>
               <span style={{ color:"#555", letterSpacing:2 }}>LOCK STATE</span>
               <span style={{ color: ltcLocked ? "#00ff88" : "#888" }}>
@@ -2711,6 +2763,7 @@ export default function SMPTEAnalyzer() {
                 </div>
               )}
             </div>
+            </>)}
           </div>
         ) : (
         <div style={{ ...PANEL, padding:14, display:"flex", flexDirection:"column", gap:14, border:"1px solid #c084fc", boxShadow:"0 0 12px rgba(192,132,252,0.35)" }}>
@@ -2894,7 +2947,7 @@ export default function SMPTEAnalyzer() {
             })}
           </div>
         </div>
-        <div style={{ maxHeight:220, overflowY:"auto", fontFamily:"monospace", fontSize:12 }}>
+        <div style={{ maxHeight:440, overflowY:"auto", fontFamily:"monospace", fontSize:12 }}>
           {sessionLog.length === 0 ? (
             <div style={{ padding:16, color:"#333", textAlign:"center", letterSpacing:2, fontSize:11 }}>
               NO EVENTS LOGGED — session clean since {new Date(sessionStartRef.current).toLocaleTimeString(undefined, { hour12: false })}
@@ -2911,6 +2964,7 @@ export default function SMPTEAnalyzer() {
                   <th style={{ padding:"4px 12px", fontWeight:"normal", textAlign:"right" }}>SNR</th>
                   <th style={{ padding:"4px 12px", fontWeight:"normal", textAlign:"left" }}>EVENT</th>
                   <th style={{ padding:"4px 12px", fontWeight:"normal", textAlign:"right" }}>COUNT</th>
+                  <th style={{ padding:"4px 12px", fontWeight:"normal", textAlign:"left" }}>NOTES</th>
                 </tr>
               </thead>
               <tbody>
@@ -2928,6 +2982,19 @@ export default function SMPTEAnalyzer() {
                     </td>
                     <td style={{ padding:"3px 12px", color: logEntryClass(e) === "info" ? "#00ff88" : "#ff3b3b", textAlign:"left" }}>{e.errors.join(" · ")}</td>
                     <td style={{ padding:"3px 12px", color:"#888", textAlign:"right" }}>{e.count > 1 ? `×${e.count}` : ""}</td>
+                    <td style={{ padding:"3px 8px", textAlign:"left" }}>
+                      <input
+                        type="text"
+                        value={e.note ?? ""}
+                        onChange={ev => setLogNote(e.id, ev.target.value)}
+                        placeholder="add note…"
+                        style={{
+                          width:"100%", minWidth:120, background:"transparent",
+                          border:"1px solid #1a1a1a", borderRadius:2, color:"#ccc",
+                          fontFamily:"monospace", fontSize:12, padding:"2px 6px", outline:"none",
+                        }}
+                      />
+                    </td>
                   </tr>
                 ))}
               </tbody>
