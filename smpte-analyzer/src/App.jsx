@@ -1930,7 +1930,9 @@ export default function SMPTEAnalyzer() {
       sessionStart: new Date(sessionStartRef.current).toISOString(),
       exportedAt: new Date().toISOString(),
       frameCount, errorCount, errorCounts,
-      entries: sessionLog.map(e => ({ ...e, t: new Date(e.t).toISOString() })),
+      // Newest-first to match the on-screen session-log order. `class` mirrors
+      // the info/error colouring shown in the table.
+      entries: [...sessionLog].reverse().map(e => ({ ...e, class: logEntryClass(e), t: new Date(e.t).toISOString() })),
     };
     downloadFile(`ltc-session-${Date.now()}.json`, "application/json", JSON.stringify(payload, null, 2));
   }
@@ -1941,9 +1943,10 @@ export default function SMPTEAnalyzer() {
       const s = String(v ?? "");
       return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     };
-    const header = "timestamp,timecode,from,rate,source,levelDbFS,snrDb,errors,count,note";
-    const rows = sessionLog.map(e =>
-      `${new Date(e.t).toISOString()},${e.tc},${e.from ?? ""},${e.rate},${e.source},${e.levelDbFS},${e.snr ?? ""},${e.errors.join("|")},${e.count ?? 1},${csv(e.note)}`
+    const header = "timestamp,class,timecode,from,rate,source,levelDbFS,snrDb,errors/info,count,note";
+    // Newest-first to match the on-screen session-log order.
+    const rows = [...sessionLog].reverse().map(e =>
+      `${new Date(e.t).toISOString()},${logEntryClass(e)},${e.tc},${e.from ?? ""},${e.rate},${e.source},${e.levelDbFS},${e.snr ?? ""},${e.errors.join("|")},${e.count ?? 1},${csv(e.note)}`
     );
     downloadFile(`ltc-session-${Date.now()}.csv`, "text/csv", [header, ...rows].join("\n"));
   }
