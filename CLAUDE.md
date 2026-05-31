@@ -113,6 +113,12 @@ The same rule is applied in `ltcDecoder.js`'s `parseFrame`. Any change to drop-f
 
 The 80-bit LTC frame structure (BCD digits, flags, user bits, sync word `0011111111111101` at bits 64–79) is implemented in `parseFrame` in `ltcDecoder.js`. The simulation path in `App.jsx` does not decode frames — it generates timecode values directly via `framesToTc`. The README's "LTC Frame Structure" table is the reference if bit-field code needs to change.
 
+**50/60 fps has two FF encodings (load-bearing, #34), selected by `parseFrame`'s `frameMode` arg:**
+- **`wide`** (default, de-facto) — FF labels every frame; frame-tens is a 3-bit field reading **bit 58** as the MSB (FF up to 79); the field-mark flag is static. Used by Tentacle/Ambient/some Sound Devices.
+- **`framepair`** (spec ST 12-1 §12) — FF labels frame *pairs* (2-bit tens, wraps at 24/29), **bit 58 is BGF1**, and the per-field LSB rides in the field-mark flag (bit 27 @ 60, bit 59 @ 50). `parseFrame` reconstructs the true frame as `FF_pair×2 + fieldMark`.
+
+`MultiRateDecoder.feed()` picks the mode from `fieldMarkBehavior()` (the rolling field-mark toggle classifier: `TOGGLING`→framepair, `STATIC`→wide) and sets `_frameMode` on the 50/60 decoders. On the wide→framepair flip it resets the cadence detector and zeroes `continuityBreaks`, because the brief wide-mode acquisition transient (FF read as the pair value, repeated every other frame) would otherwise leave spurious REPEAT breaks. `ltcSynth.js` can generate both via the `convention` arg (`buildLtcAudioBuffer`/`encodeFrameBits`); round-trip coverage is in `test/framePair.test.js`. The FIELD-MARK row in the UI surfaces which convention is in use.
+
 ### API publisher
 
 `publisher.js` exports a `Publisher` class. `App.jsx` creates one instance when `apiEnabled` is true. On each tick it calls `publisher.send({type:"tc",...})`. On each error-state transition it calls `publisher.send({type:"error",...})`. The publisher handles reconnection with exponential back-off (1 s → 10 s max). The bridge sends `{type:"status"}` messages back; the app reads `msg.subscribers` from these to display the subscriber count.
