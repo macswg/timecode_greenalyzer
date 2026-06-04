@@ -212,7 +212,10 @@ function generateSimulatedAnalysis(rateKey, levelDbFS, noiseLevel, dropoutProb) 
   // Simulate errors
   const hasDropout = Math.random() < dropoutProb;
   const hasNoise = noiseLevel > 0.15;
-  const isClipping = levelDbFS > LEVEL_SPEC.CLIP_THRESHOLD;
+  // Synthetic per-sample peak rides a few dB above RMS; CLIP is peak-driven so
+  // the sim mirrors the live path's semantics.
+  const peakDbFS = levelDbFS + (Math.random() * 3 - 1.5);
+  const isClipping = peakDbFS > LEVEL_SPEC.CLIP_THRESHOLD;
   const isHot = levelDbFS > LEVEL_SPEC.HOT_THRESHOLD;
   const isTooQuiet = levelDbFS < LEVEL_SPEC.LOW_THRESHOLD;
   const isDropout = levelDbFS < LEVEL_SPEC.SILENT_THRESHOLD || hasDropout;
@@ -232,7 +235,7 @@ function generateSimulatedAnalysis(rateKey, levelDbFS, noiseLevel, dropoutProb) 
     colorFrame: false,
     rateKey,
     levelDbFS,
-    peakDbFS: levelDbFS + (isClipping ? 0 : (Math.random() * 3 - 1.5)),
+    peakDbFS,
     noiseFloor: levelDbFS - 20 - noiseLevel * 30,
     snr: 60 - noiseLevel * 50,
     thd: noiseLevel * 5,
@@ -292,6 +295,9 @@ function LevelMeter({ label, value, peak, min=-60, max=0, showTicks=true }) {
               : value > LEVEL_SPEC.NOMINAL ? "#ccff33"
               : value > LEVEL_SPEC.LOW_THRESHOLD ? "#00ff88"
               : "#ff5500";
+  // Peak (per-sample) is the physically correct clip signal — flag the hold
+  // marker red when peak crosses the clip threshold even if RMS fill is calm.
+  const peakColor = peak > LEVEL_SPEC.CLIP_THRESHOLD ? "#ff1a1a" : color;
 
   const markers = [-60, -40, -30, -20, -18, -12, -6, -3, 0];
 
@@ -325,8 +331,8 @@ function LevelMeter({ label, value, peak, min=-60, max=0, showTicks=true }) {
           <div style={{
             position:"absolute", top:0, bottom:0,
             left:`${Math.min(99.5, peakPct)}%`,
-            width:2, background: color,
-            boxShadow:`0 0 4px ${color}`,
+            width:2, background: peakColor,
+            boxShadow:`0 0 4px ${peakColor}`,
           }} />
         )}
       </div>
@@ -422,7 +428,7 @@ function BitStreamView({ bits, bitErrors, locked }) {
           );
         })}
       </div>
-      <div style={{ marginTop:8, display:"flex", justifyContent:"space-between", fontSize:11, color:"#444", fontFamily:"monospace" }}>
+      <div style={{ marginTop:8, marginBottom:-8, display:"flex", justifyContent:"space-between", fontSize:11, color:"#444", fontFamily:"monospace" }}>
         <span>
           <span style={{ color:"#00ff88" }}>■</span> data bits ·{" "}
           <span style={{ color:"#22d3ee" }}>■</span> sync word
@@ -1053,7 +1059,10 @@ export default function SMPTEAnalyzer() {
       // SNR gauge already report signal-quality information without a
       // misleading boolean.
       const live = [];
-      if (lvl > LEVEL_SPEC.CLIP_THRESHOLD) live.push("CLIP");
+      // CLIP is a per-sample full-scale event, so detect it from peak, not RMS
+      // (RMS averages clipped samples down and can read below −1 dBFS while
+      // individual samples slam into 0). HOT remains an RMS/sustained-level tag.
+      if ((realPeakDb ?? lvl) > LEVEL_SPEC.CLIP_THRESHOLD) live.push("CLIP");
       else if (lvl > LEVEL_SPEC.HOT_THRESHOLD) live.push("HOT");
       // LOW / DROPOUT only mean something for an LTC signal that's degrading.
       // Without a recent decoded frame the input is either silence (idle
@@ -2327,11 +2336,12 @@ export default function SMPTEAnalyzer() {
         {/* Level Section */}
         <div className="panel-level" style={{ ...PANEL, padding:14, display:"flex", flexDirection:"column", gap:6 }}>
           <div style={{ fontSize:11, color:"#ff9900", letterSpacing:3 }}>SIGNAL LEVEL</div>
-          {/* RMS and PEAK share one identical dB scale; render it only under
-              PEAK (the lower meter) to save a row. */}
+          {/* Single bar: RMS drives the fill (HOT/LOW coloring), the peak-hold
+              marker rides on top and turns red on clip. LTC is near-square
+              (crest factor ≈ 1), so a separate PEAK bar carried no independent
+              information — peak instead does real work as the clip detector. */}
           <div style={{ display:"flex", flexDirection:"column", gap:2 }}>
-            <LevelMeter label="RMS" value={analysis?.levelDbFS ?? levelDbFS} showTicks={false} />
-            <LevelMeter label="PEAK" value={analysis?.peakDbFS ?? levelDbFS + 2} peak={peakHold} />
+            <LevelMeter label="LEVEL" value={analysis?.levelDbFS ?? levelDbFS} peak={peakHold} />
           </div>
           <div style={{ height:"1px", background:"#111" }} />
           <div style={{ display:"flex", flexDirection:"column", gap:3 }}>
@@ -2370,7 +2380,7 @@ export default function SMPTEAnalyzer() {
               FRAMES DECODED are shown in the grid legend above and in LIVE INPUT
               STATUS. This line is `ltcLocked` (fresh decode), distinct from the
               top LOCK badge which is `frameValid` (decode AND clean levels). */}
-          <div style={{ fontSize:11, fontFamily:"monospace", color:"#444", lineHeight:2 }}>
+          <div style={{ fontSize:11, fontFamily:"monospace", color:"#444", lineHeight:2, marginTop:-8, marginBottom:-8 }}>
             <div>SYNC WORD: <span style={{color: ltcLocked ? "#00ff88" : "#ff3b3b"}}>
               {ltcLocked ? "VALID" : "—"}
             </span></div>
