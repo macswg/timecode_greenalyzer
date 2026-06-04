@@ -30,8 +30,10 @@ Override port with `PORT=9000`.
 ## Phone viewer
 
 Open `http://localhost:8765/` in any browser to see the running timecode, the
-current error tags, and the last 10 continuity breaks. The page connects to
-`/subscribe` itself and auto-reconnects with 1 s → 10 s back-off.
+current error tags, and a live **mirror of the analyzer's session log** (the same
+entries, ids, counts, and notes — not a separate log the phone keeps). The page
+connects to `/subscribe` itself and auto-reconnects with 1 s → 10 s back-off. The
+log is read-only on the phone; notes are authored in the analyzer.
 
 To view from a phone over Tailscale:
 
@@ -62,9 +64,17 @@ orange rate label; non-drop with `:` and blue, matching the analyzer.
   `"JUMP"` (edit splice / dropout, delta > 1), or `"REWIND"` (backwards, delta < 0).
   `from` and `to` are formatted timecode strings. Gaps ≥ 500 ms between decoded frames
   reset continuity tracking and do not produce this message.
+- `{"type":"log", t, entries}` full session-log snapshot, published whenever the
+  analyzer's log changes (throttled to ≤ 1 send / 750 ms; bursts of per-second
+  count flushes coalesce into one). `entries` is the whole log array, oldest-first,
+  each `{id, t, tc, from?, rate, source, levelDbFS, snr, errors, count, note?}`.
+  It's a snapshot, not a delta — idempotent, so a dropped message self-heals on the
+  next one. The bridge caches the latest snapshot and replays it in `hello`.
 - `{"type":"status", t, subscribers, publisher}` heartbeat on connection
   state changes.
-- `{"type":"hello", t, lastTc}` sent to each new subscriber on connect.
+- `{"type":"hello", t, lastTc, lastLog}` sent to each new subscriber on connect,
+  so a phone joining mid-session gets the current timecode and full session log
+  immediately. Either field is `null` if nothing has been published yet.
 
 ## Quick test
 

@@ -40,6 +40,7 @@
   }
   body {
     display: flex; flex-direction: column;
+    overflow-y: auto;
     padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
   }
   header {
@@ -67,11 +68,11 @@
   .badge.on.df   { color: var(--orange); border-color: var(--orange); box-shadow: 0 0 8px rgba(255,170,0,0.35); }
 
   main {
-    flex: 1;
+    flex: 0 0 auto;
     display: flex; flex-direction: column;
-    align-items: center; justify-content: center;
-    gap: 14px;
-    padding: 18px 10px;
+    align-items: center; justify-content: flex-start;
+    gap: 10px;
+    padding: 22px 10px 12px;
     min-height: 0;
   }
   .tc {
@@ -111,42 +112,98 @@
   .metric .val.muted { color: #555; }
 
   .errors {
-    display: flex; flex-wrap: wrap; gap: 6px;
+    display: flex; flex-wrap: wrap; gap: 8px;
     justify-content: center;
-    min-height: 22px;
+    min-height: 0;
   }
+  /* Matches the full analyzer's StatusBadge: per-error colour, translucent
+     fill, outer+inner glow, blinking dot. Colour/border/glow are set inline
+     per-error in applyErrors(); this rule owns layout + typography. */
   .tag {
-    font-size: 11px; letter-spacing: 2px;
-    padding: 2px 8px;
-    border: 1px solid var(--red);
-    color: var(--red);
+    display: inline-flex; align-items: center; gap: 4px;
+    font-family: "Share Tech Mono", monospace;
+    font-size: 13px; letter-spacing: 2px; font-weight: 700;
+    padding: 4px 10px; border-radius: 2px;
+    border: 1px solid var(--red); color: var(--red);
   }
+  .tag .blink { animation: blink 0.5s step-end infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
 
-  .breaks {
+  /* SESSION LOG — a read-only mirror of the analyzer's session log, fed by
+     {type:"log"} snapshots. Fills the lower area and scrolls internally so the
+     timecode readout above stays put. */
+  .logwrap {
+    flex: 1 1 auto;
+    min-height: 0;
     width: 100%;
-    max-width: 720px;
+    display: flex; flex-direction: column;
     border-top: 1px solid var(--border);
     padding: 8px 14px 14px;
-    font-size: 11px;
-    color: #999;
   }
-  .breaks-title {
-    letter-spacing: 3px; color: #666; margin-bottom: 6px;
+  .log-title {
+    display: flex; justify-content: space-between; align-items: baseline;
+    letter-spacing: 3px; color: #666; font-size: 11px; margin-bottom: 6px;
   }
-  .breaks ul { list-style: none; margin: 0; padding: 0; }
-  .breaks li {
-    display: flex; gap: 10px;
-    padding: 2px 0;
+  .log-count { color: #555; letter-spacing: 1px; }
+  .log-empty { color: #333; letter-spacing: 2px; font-size: 11px; padding: 6px 0; }
+  .log {
+    flex: 1 1 auto; min-height: 0; overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .log ul { list-style: none; margin: 0; padding: 0; }
+  .log li {
+    padding: 5px 6px;
     border-bottom: 1px dotted #1a1a1a;
+    border-radius: 3px;
     font-family: "B612 Mono", monospace;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    transition: background 0.12s;
   }
-  .breaks li:last-child { border-bottom: 0; }
-  .bt { width: 60px; }
-  .bt.JUMP   { color: var(--orange); }
-  .bt.REPEAT { color: #ffd24a; }
-  .bt.REWIND { color: var(--blue); }
-  .bd { color: #777; width: 60px; }
-  .br { color: #bbb; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .log li:last-child { border-bottom: 0; }
+  .log li:active { background: rgba(255,255,255,0.06); }
+  /* brief flash applied on a successful copy */
+  .log li.copied { background: rgba(0,255,136,0.14); }
+  .log .row1 { display: flex; gap: 8px; align-items: baseline; font-size: 12px; }
+  .log .id { color: #555; flex: none; min-width: 30px; text-align: right; }
+  .log .time { color: #555; flex: none; }
+  .log .event { font-weight: 700; letter-spacing: 1px; flex: 1; overflow: hidden; text-overflow: ellipsis; }
+  .log .event.info  { color: var(--green); }
+  .log .event.error { color: var(--red); }
+  .log .count { color: #888; flex: none; }
+  .log .row2 { margin-left: 38px; color: #888; font-size: 10px; display: flex; flex-wrap: wrap; gap: 2px 10px; }
+  .log .row2 .tc2 { color: #bbb; }
+  .log .note { margin-left: 38px; margin-top: 2px; color: #ccb37a; font-size: 10px; font-style: italic; }
+
+  /* Tap-to-copy confirmation toast. */
+  .toast {
+    position: fixed; left: 50%;
+    bottom: calc(env(safe-area-inset-bottom) + 22px);
+    transform: translateX(-50%) translateY(8px);
+    background: #0d0d0d; border: 1px solid var(--green); color: var(--green);
+    font-family: "Share Tech Mono", monospace; font-size: 12px; letter-spacing: 3px;
+    padding: 8px 18px; border-radius: 3px;
+    box-shadow: 0 0 12px rgba(0,255,136,0.3);
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.18s, transform 0.18s;
+    z-index: 50;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .toast.err {
+    border-color: var(--red); color: var(--red);
+    box-shadow: 0 0 12px rgba(255,59,59,0.3);
+  }
+
+  /* Short viewports (phone landscape): the timecode's vh-based clamp grows
+     too tall and gets clipped at the top. Cap it by viewport height, shrink
+     the rate, and tighten padding so the whole readout fits without scroll. */
+  @media (max-height: 480px) {
+    main { padding: 10px 10px 8px; gap: 6px; }
+    .tc { font-size: clamp(28px, 13vh, 96px); }
+    .rate { font-size: clamp(16px, 5vh, 28px); }
+    .metrics { gap: 2px 14px; }
+    .metric .val { font-size: 14px; }
+  }
 </style>
 </head>
 <body>
@@ -172,16 +229,21 @@
   </div>
 </main>
 
-<section class="breaks">
-  <div class="breaks-title">CONTINUITY BREAKS</div>
-  <ul id="breaks"></ul>
+<section class="logwrap">
+  <div class="log-title"><span>SESSION LOG</span><span class="log-count" id="log-count"></span></div>
+  <div class="log-empty" id="log-empty">NO EVENTS</div>
+  <div class="log"><ul id="log"></ul></div>
 </section>
+
+<div class="toast" id="toast"></div>
 
 <script>
 (() => {
   const DF_RATES = new Set(["29.97df", "59.94df"]);
   const STALE_MS = 500;
-  const MAX_BREAKS = 10;
+  // Session-log entries whose leading tag is operational (not a fault) render
+  // green, matching the analyzer's logEntryClass / INFO_TAGS.
+  const INFO_TAGS = new Set(["LOCK_ACQUIRED", "MEASURING_COMMIT", "CARRIER_SNAPSHOT"]);
 
   const dotEl    = document.getElementById("dot");
   const connEl   = document.getElementById("conn");
@@ -190,7 +252,10 @@
   const tcEl     = document.getElementById("tc");
   const rateEl   = document.getElementById("rate");
   const errorsEl = document.getElementById("errors");
-  const breaksEl = document.getElementById("breaks");
+  const logEl      = document.getElementById("log");
+  const logCountEl = document.getElementById("log-count");
+  const logEmptyEl = document.getElementById("log-empty");
+  const toastEl    = document.getElementById("toast");
   const mSrc     = document.getElementById("m-src");
   const mConf    = document.getElementById("m-conf");
   const mSubs    = document.getElementById("m-subs");
@@ -291,35 +356,166 @@
     }, STALE_MS + 20);
   }
 
+  // Per-error colours, kept in sync with the full analyzer's StatusBadge map
+  // in App.jsx. Unknown tags fall back to the cyan default used there.
+  const ERR_COLORS = {
+    CLIP: "#ff0000", HOT: "#ff6600", LOW: "#ff9900", DROPOUT: "#ff3399",
+    NOISE: "#cc88ff", DF_INVALID: "#ffaa00", AUDIO_GAP: "#22d3ee",
+  };
   function applyErrors(errs) {
     errorsEl.replaceChildren(...(errs || []).map(e => {
+      const c = ERR_COLORS[e] || "#22d3ee";
       const el = document.createElement("span");
       el.className = "tag";
-      el.textContent = e;
+      el.style.cssText =
+        `border:1px solid ${c};background:${c}22;color:${c};` +
+        `box-shadow:0 0 8px ${c}44, inset 0 0 8px ${c}11;`;
+      const dot = document.createElement("span");
+      dot.className = "blink";
+      dot.textContent = "●";
+      el.append(dot, document.createTextNode(e));
       return el;
     }));
   }
 
-  function prependBreak(msg) {
-    const li = document.createElement("li");
-    const t = document.createElement("span"); t.className = `bt ${msg.breakType}`; t.textContent = msg.breakType;
-    const d = document.createElement("span"); d.className = "bd"; d.textContent = (msg.delta > 0 ? "+" : "") + msg.delta;
-    const r = document.createElement("span"); r.className = "br"; r.textContent = `${msg.from} → ${msg.to}`;
-    li.append(t, d, r);
-    breaksEl.prepend(li);
-    while (breaksEl.children.length > MAX_BREAKS) breaksEl.lastChild.remove();
+  const fmtTime = (t) => {
+    try { return new Date(t).toLocaleTimeString(undefined, { hour12: false }); }
+    catch { return ""; }
+  };
+  const entryClass = (e) => {
+    const lead = e.errors && e.errors[0];
+    return lead && INFO_TAGS.has(lead) ? "info" : "error";
+  };
+
+  // Plain-text form of a log entry, for tap-to-copy. Mirrors what's shown.
+  function entryText(e) {
+    const head = [
+      e.id != null ? `#${e.id}` : "",
+      fmtTime(e.t),
+      (e.errors || []).join(" · "),
+      e.count > 1 ? `×${e.count}` : "",
+    ].filter(Boolean).join("  ");
+    const tc = e.from ? `${e.from} → ${e.tc}` : (e.tc ?? "");
+    const meta = [
+      e.rate, e.source,
+      Number.isFinite(e.levelDbFS) ? `${e.levelDbFS} dBFS` : null,
+      e.snr != null ? `${Number(e.snr).toFixed(1)} dB` : null,
+    ].filter(Boolean).join(" · ");
+    let s = `${head} — ${[tc, meta].filter(Boolean).join(" · ")}`;
+    if (e.note) s += ` — "${e.note}"`;
+    return s;
+  }
+
+  let toastTimer = null;
+  function showToast(msg, ok = true) {
+    toastEl.textContent = msg;
+    toastEl.classList.toggle("err", !ok);
+    toastEl.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toastEl.classList.remove("show"), 1400);
+  }
+
+  // Clipboard API needs a secure context (https/localhost); over plain-http
+  // Tailscale it's unavailable, so fall back to the execCommand textarea trick.
+  function legacyCopy(text) {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.top = "-1000px";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      return ok;
+    } catch { return false; }
+  }
+  async function copyEntry(text, li) {
+    let ok = false;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        ok = true;
+      } else {
+        ok = legacyCopy(text);
+      }
+    } catch { ok = legacyCopy(text); }
+    showToast(ok ? "COPIED" : "COPY FAILED", ok);
+    if (ok && li) {
+      li.classList.add("copied");
+      setTimeout(() => li.classList.remove("copied"), 350);
+    }
+  }
+
+  // Re-render the whole list from a session-log snapshot. The analyzer is the
+  // single source of truth; we never mutate or accumulate locally. Newest-first
+  // to match the analyzer's on-screen order.
+  function renderLog(entries) {
+    const list = Array.isArray(entries) ? entries : [];
+    logCountEl.textContent = list.length
+      ? `${list.length} ENTR${list.length === 1 ? "Y" : "IES"}`
+      : "";
+    logEmptyEl.style.display = list.length ? "none" : "";
+    const frag = document.createDocumentFragment();
+    for (let i = list.length - 1; i >= 0; i--) {
+      const e = list[i];
+      const li = document.createElement("li");
+      li.title = "Tap to copy";
+      const copyText = entryText(e);
+      li.addEventListener("click", () => copyEntry(copyText, li));
+
+      const row1 = document.createElement("div"); row1.className = "row1";
+      const id = document.createElement("span"); id.className = "id";
+      id.textContent = e.id != null ? `#${e.id}` : "";
+      const time = document.createElement("span"); time.className = "time";
+      time.textContent = fmtTime(e.t);
+      const ev = document.createElement("span"); ev.className = `event ${entryClass(e)}`;
+      ev.textContent = (e.errors || []).join(" · ");
+      const cnt = document.createElement("span"); cnt.className = "count";
+      cnt.textContent = e.count > 1 ? `×${e.count}` : "";
+      row1.append(id, time, ev, cnt);
+      li.append(row1);
+
+      const row2 = document.createElement("div"); row2.className = "row2";
+      const tc2 = document.createElement("span"); tc2.className = "tc2";
+      tc2.textContent = e.from ? `${e.from} → ${e.tc}` : (e.tc ?? "");
+      row2.append(tc2);
+      const meta = [
+        e.rate, e.source,
+        Number.isFinite(e.levelDbFS) ? `${e.levelDbFS} dBFS` : null,
+        e.snr != null ? `${Number(e.snr).toFixed(1)} dB` : null,
+      ].filter(Boolean).join(" · ");
+      if (meta) { const m = document.createElement("span"); m.textContent = meta; row2.append(m); }
+      li.append(row2);
+
+      if (e.note) {
+        const n = document.createElement("div"); n.className = "note";
+        n.textContent = `“${e.note}”`;
+        li.append(n);
+      }
+      frag.append(li);
+    }
+    logEl.replaceChildren(frag);
   }
 
   function handle(msg) {
     if (!msg || !msg.type) return;
     if (msg.type === "hello") {
       if (msg.lastTc) applyTc(msg.lastTc);
+      if (msg.lastLog) renderLog(msg.lastLog.entries);
     } else if (msg.type === "tc") {
       applyTc(msg);
     } else if (msg.type === "error") {
       applyErrors(msg.errors);
+    } else if (msg.type === "log") {
+      // Full session-log snapshot — the mirror is the analyzer's, not ours.
+      renderLog(msg.entries);
     } else if (msg.type === "continuity") {
-      prependBreak(msg);
+      // Continuity breaks already appear in the session log as TC_* entries;
+      // the standalone message needs no separate handling here.
     } else if (msg.type === "status") {
       setVal(mSubs, Number.isFinite(msg.subscribers) ? String(msg.subscribers) : "—");
       pubConnected = !!msg.publisher;

@@ -1094,6 +1094,10 @@ export default function SMPTEAnalyzer() {
       // caused a second render per error rollover.
       const finalCount = currentSigTicksRef.current;
       const entry = {
+        // Assign an id here (this path appends directly rather than via
+        // pushLog) so every entry is addressable — the session-log `#` column
+        // and the phone's tap-to-copy both rely on it.
+        id: ++logIdRef.current,
         t: Date.now(),
         tc: tcStr,
         rate: rateKey,
@@ -1420,6 +1424,27 @@ export default function SMPTEAnalyzer() {
     p.connect();
     return () => { p.close(); publisherRef.current = null; };
   }, [apiEnabled, apiUrl]);
+
+  // Mirror the full session log to subscribers (the phone relay). We publish a
+  // whole-log *snapshot* — not per-entry deltas — so it's idempotent: a dropped
+  // message is corrected by the next snapshot, and a late-joining viewer just
+  // gets the bridge's cached copy. The analyzer remains the single source of
+  // truth; the phone never keeps its own log. A single stable 750 ms interval
+  // sends only when the log changed (dirty flag), coalescing the per-second
+  // count flushes during sustained errors into at most one send.
+  const sessionLogTxRef = useRef(sessionLog);
+  const logDirtyRef = useRef(true);
+  useEffect(() => { sessionLogTxRef.current = sessionLog; logDirtyRef.current = true; }, [sessionLog]);
+  useEffect(() => {
+    if (!apiEnabled) return;
+    logDirtyRef.current = true; // push current state once on (re)connect
+    const id = setInterval(() => {
+      if (!logDirtyRef.current || !publisherRef.current) return;
+      logDirtyRef.current = false;
+      publisherRef.current.send({ type: "log", t: Date.now(), entries: sessionLogTxRef.current });
+    }, 750);
+    return () => clearInterval(id);
+  }, [apiEnabled]);
 
   async function refreshAudioDevices() {
     try {
@@ -1904,6 +1929,7 @@ export default function SMPTEAnalyzer() {
 
   function clearLog() {
     setSessionLog([]);
+    logIdRef.current = 0; // restart entry indexing at #1 for the fresh session
     setErrorCount(0);
     setErrorCounts({ CLIP:0, HOT:0, LOW:0, DROPOUT:0, NOISE:0, DF_INVALID:0, AUDIO_GAP:0 });
     lastErrSigRef.current = "";
@@ -1944,10 +1970,10 @@ export default function SMPTEAnalyzer() {
       const s = String(v ?? "");
       return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     };
-    const header = "timestamp,class,timecode,from,rate,source,levelDbFS,snrDb,errors/info,count,note";
+    const header = "id,timestamp,class,timecode,from,rate,source,levelDbFS,snrDb,errors/info,count,note";
     // Newest-first to match the on-screen session-log order.
     const rows = [...sessionLog].reverse().map(e =>
-      `${new Date(e.t).toISOString()},${logEntryClass(e)},${e.tc},${e.from ?? ""},${e.rate},${e.source},${e.levelDbFS},${e.snr ?? ""},${e.errors.join("|")},${e.count ?? 1},${csv(e.note)}`
+      `${e.id},${new Date(e.t).toISOString()},${logEntryClass(e)},${e.tc},${e.from ?? ""},${e.rate},${e.source},${e.levelDbFS},${e.snr ?? ""},${e.errors.join("|")},${e.count ?? 1},${csv(e.note)}`
     );
     downloadFile(`ltc-session-${Date.now()}.csv`, "text/csv", [header, ...rows].join("\n"));
   }
@@ -2928,6 +2954,7 @@ export default function SMPTEAnalyzer() {
             <table style={{ width:"100%", borderCollapse:"collapse" }}>
               <thead>
                 <tr style={{ color:"#444", fontSize:10, letterSpacing:2 }}>
+                  <th style={{ padding:"4px 12px", fontWeight:"normal", textAlign:"right" }}>#</th>
                   <th style={{ padding:"4px 12px", fontWeight:"normal", textAlign:"left" }}>TIME</th>
                   <th style={{ padding:"4px 12px", fontWeight:"normal", textAlign:"left" }}>TIMECODE</th>
                   <th style={{ padding:"4px 12px", fontWeight:"normal", textAlign:"left" }}>RATE</th>
@@ -2942,6 +2969,7 @@ export default function SMPTEAnalyzer() {
               <tbody>
                 {[...sessionLog].reverse().map((e, i) => (
                   <tr key={sessionLog.length - i} style={{ borderTop:"1px solid #111", color:"#999" }}>
+                    <td style={{ padding:"3px 12px", color:"#555", textAlign:"right" }}>{e.id}</td>
                     <td style={{ padding:"3px 12px", color:"#555", textAlign:"left" }}>{new Date(e.t).toLocaleTimeString(undefined, { hour12: false })}</td>
                     <td style={{ padding:"3px 12px", color:"#00ff88", textAlign:"left" }}>
                       {e.from ? <>{e.from} <span style={{color:"#555"}}>→</span> {e.tc}</> : e.tc}

@@ -31,6 +31,10 @@ const MIME = {
 const subscribers = new Set();
 let publisher = null;
 let lastTc = null;
+// Latest session-log snapshot from the publisher, cached so a phone that
+// connects mid-session is handed the full log immediately (see /subscribe
+// hello). Live updates arrive via generic fan-out like every other message.
+let lastLog = null;
 // framesOut: count of tc messages forwarded (per ingest message, not per
 // subscriber). fanoutSends: total ws.send() calls across all subscribers
 // (framesOut × current subscriber count, roughly), useful for diagnosing
@@ -113,6 +117,7 @@ wssIngest.on("connection", (ws, req) => {
     try { msg = JSON.parse(raw.toString()); } catch { return; }
     if (msg.type === "tc") { stats.framesIn++; lastTc = msg; }
     else if (msg.type === "error") { stats.errorsIn++; }
+    else if (msg.type === "log") { lastLog = msg; }
     const payload = JSON.stringify(msg);
     if (msg.type === "tc") stats.framesOut++;
     for (const s of subscribers) {
@@ -130,7 +135,7 @@ wssIngest.on("connection", (ws, req) => {
 wssSubscribe.on("connection", (ws, req) => {
   subscribers.add(ws);
   console.log(`[sub] +1 from ${req.socket.remoteAddress} (total ${subscribers.size})`);
-  ws.send(JSON.stringify({ type: "hello", t: Date.now(), lastTc }));
+  ws.send(JSON.stringify({ type: "hello", t: Date.now(), lastTc, lastLog }));
   broadcastStatus();
   ws.on("close", () => {
     subscribers.delete(ws);
