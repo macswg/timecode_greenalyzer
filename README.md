@@ -77,6 +77,12 @@ Listens on `:8765` by default. Set the `PORT` environment variable to override. 
 
 To connect the analyzer to the bridge, enter the WebSocket URL (`ws://localhost:8765/ingest`) in the API PUBLISHER section of the UI and click PUBLISH.
 
+Once published, open the bridge's `/` in any browser (including a phone over Tailscale) for a read-only mirror of the running timecode and the analyzer's session log:
+
+<p align="center"><img src="docs/images/tc_mobile.png" alt="The bridge phone viewer on mobile — running timecode, level/drift/SNR readouts, subscriber count, and a live mirror of the analyzer's session log." width="300"></p>
+
+<p align="center"><em>The phone viewer mirroring a live 29.97 DF feed. See <a href="smpte-bridge/README.md">smpte-bridge/README.md</a> for details.</em></p>
+
 ---
 
 ## Specifications Referenced
