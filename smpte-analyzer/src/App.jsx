@@ -799,6 +799,13 @@ export default function SMPTEAnalyzer() {
   // The current device's reported native rate (track.getSettings().sampleRate).
   // Unlike the reused AudioContext's fixed rate, this updates per input.
   const [deviceSampleRate, setDeviceSampleRate] = useState(null);
+  // RESAMPLED flag: true only when the measured capture rate diverges from the
+  // device's nominal rate by enough to mean an actual sample-rate converter in
+  // the chain (kHz-scale — the closest standard pair, 44.1k↔48k, is 3900 Hz
+  // apart), NOT ordinary ADC-vs-host-quartz clock offset (a few Hz / ~hundreds
+  // of ppm, surfaced separately as CAPTURE CLOCK ERROR in the AUDIT panel).
+  // Hysteresis (on >1%, off <0.5%) keeps it from flickering at the boundary.
+  const [sampleRateResampled, setSampleRateResampled] = useState(false);
   const timeBufRef = useRef(null);
   // EMA state for the displayed SNR / THD / noise-floor gauges. The raw FFT
   // measurement is left untouched so the underlying math stays honest; only
@@ -1435,6 +1442,21 @@ export default function SMPTEAnalyzer() {
   const sessionLogTxRef = useRef(sessionLog);
   const logDirtyRef = useRef(true);
   useEffect(() => { sessionLogTxRef.current = sessionLog; logDirtyRef.current = true; }, [sessionLog]);
+  // Decide the RESAMPLED flag with hysteresis so it can't flicker at the
+  // boundary. measuredSampleRate updates ~per tick while locked; the band
+  // (on >1%, off <0.5% of nominal) keeps the displayed flag steady even as the
+  // measured number jitters by a few Hz. Anything inside the band is ordinary
+  // clock drift, not resampling — see CAPTURE CLOCK ERROR (ppm) in the AUDIT panel.
+  useEffect(() => {
+    const measured = analysis?.ltcLocked ? measuredSampleRate : null;
+    const nominal = deviceSampleRate;
+    if (playingFile || measured == null || nominal == null || nominal <= 0) {
+      setSampleRateResampled(false);
+      return;
+    }
+    const ratio = Math.abs(measured - nominal) / nominal;
+    setSampleRateResampled(prev => (prev ? ratio > 0.005 : ratio > 0.01));
+  }, [measuredSampleRate, deviceSampleRate, analysis?.ltcLocked, playingFile]);
   useEffect(() => {
     if (!apiEnabled) return;
     logDirtyRef.current = true; // push current state once on (re)connect
@@ -2571,15 +2593,14 @@ export default function SMPTEAnalyzer() {
                 }
                 // Live path. `measured` is the ground truth — samples actually
                 // delivered per second. `nominal` is what the device reports
-                // via getSettings().sampleRate; only shown when it diverges
-                // from measured (i.e. the OS is resampling the input). The
-                // old code fell back to the AudioContext's rate when
-                // getSettings was unavailable, which displayed a misleading
-                // "48000 Hz nominal" that was really just the context rate.
+                // via getSettings().sampleRate. The RESAMPLED call (an actual
+                // SRC in the chain) is decided with hysteresis in an effect —
+                // see `sampleRateResampled` — so it can't flicker on ordinary
+                // clock drift. The old code fell back to the AudioContext's
+                // rate when getSettings was unavailable, which displayed a
+                // misleading "48000 Hz nominal" that was really the context rate.
                 const measured = ltcLocked ? measuredSampleRate : null;
                 const nominal = deviceSampleRate;
-                const diverges = measured != null && nominal != null
-                  && Math.abs(measured - nominal) > 10;
                 if (measured == null) {
                   return (
                     <span style={{ color:"#666" }}>
@@ -2587,7 +2608,7 @@ export default function SMPTEAnalyzer() {
                     </span>
                   );
                 }
-                if (diverges) {
+                if (sampleRateResampled && nominal != null) {
                   return (
                     <span style={{ color:"#ffaa00" }}>
                       {measured} Hz measured · {nominal} Hz nominal · RESAMPLED
