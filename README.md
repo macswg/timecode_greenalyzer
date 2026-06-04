@@ -6,7 +6,7 @@ This tool reads **LTC only**. VITC (vertical interval timecode) and ATC (ancilla
 
 For a full list of every on-screen indicator and where its value comes from, see [`INDICATORS.md`](INDICATORS.md).
 
-![The analyzer locked to a 29.97 DF source — decoded timecode, signal-level meters, rate detection with confidence, and the live 80-bit frame-integrity map.](docs/images/tc_running.png)
+![The analyzer locked to a 29.97 DF source — decoded timecode, the signal-level meter, rate detection with confidence, and the live 80-bit frame-integrity map.](docs/images/tc_running.png)
 
 <p align="center"><em>Locked to a 29.97 DF source: decoded timecode, RMS/peak meters, rate detection with confidence, and the live 80-bit frame map.</em></p>
 
