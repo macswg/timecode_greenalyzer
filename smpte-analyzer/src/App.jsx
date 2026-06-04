@@ -223,8 +223,10 @@ function generateSimulatedAnalysis(rateKey, levelDbFS, noiseLevel, dropoutProb) 
   const errors = [];
   if (isClipping) errors.push("CLIP");
   if (isHot && !isClipping) errors.push("HOT");
-  if (isTooQuiet) errors.push("LOW");
+  // DROPOUT (no signal) and LOW (weak signal) are mutually exclusive: a dead
+  // signal is below both thresholds but is one condition, so DROPOUT wins.
   if (isDropout) errors.push("DROPOUT");
+  else if (isTooQuiet) errors.push("LOW");
   if (hasNoise) errors.push("NOISE");
 
   const frameValid = !isDropout && !isClipping && !isTooQuiet;
@@ -728,6 +730,10 @@ export default function SMPTEAnalyzer() {
   // pin the marker forever.
   const peakHoldUntilRef = useRef(0);
   const lastErrSigRef = useRef("");
+  // Previous tick's error-tag set, for rising-edge (per-event) counting: the
+  // top counter and per-badge counts increment when a tag goes absent->present,
+  // not every tick it holds — so "12 ERRORS" means 12 episodes, not 12 × 33 ms.
+  const prevErrorsRef = useRef(new Set());
   // Tick count of the currently-active error signature; rolled into the most
   // recent session log entry's `count` field on transition (and periodically
   // while sustained) so a repeating error isn't logged 60× — just once with
@@ -1072,8 +1078,11 @@ export default function SMPTEAnalyzer() {
       // a frame decoded within the last 2 s.
       const lastDecodeAge = dec?.lastFrame ? performance.now() - dec.lastFrame.t : Infinity;
       const hasRecentFrame = lastDecodeAge < 2000;
-      if (lvl < LEVEL_SPEC.LOW_THRESHOLD && hasRecentFrame) live.push("LOW");
+      // DROPOUT (no signal) and LOW (weak signal) are mutually exclusive: a
+      // dead signal is below both thresholds but is one condition, so the
+      // stronger DROPOUT claim wins and LOW covers only low-but-not-silent.
       if (lvl < LEVEL_SPEC.SILENT_THRESHOLD && hasRecentFrame) live.push("DROPOUT");
+      else if (lvl < LEVEL_SPEC.LOW_THRESHOLD && hasRecentFrame) live.push("LOW");
       // DF conformance: a frame asserting DF that lands on FF<dropPerMin at
       // a non-tenth-minute boundary is the spec violation captured by
       // isValidDropFrame. Only meaningful once cadence is known (so we can
@@ -1093,14 +1102,22 @@ export default function SMPTEAnalyzer() {
     }
     setAnalysis(data);
     setFrameCount(c => c + 1);
-    if (data.errors.length > 0) {
-      setErrorCount(c => c + 1);
+    // Rising-edge counting: count once per condition entered, not once per
+    // tick it holds. A tag rises when it goes absent -> present this tick.
+    const prevSet = prevErrorsRef.current;
+    const rising = data.errors.filter(e => !prevSet.has(e));
+    if (rising.length > 0) {
+      // Top counter = total error events across all categories, so the
+      // per-category badges always sum to the headline and the headline is
+      // never smaller than a single badge.
+      setErrorCount(c => c + rising.length);
       setErrorCounts(prev => {
         const next = { ...prev };
-        for (const e of data.errors) if (e in next) next[e] = next[e] + 1;
+        for (const e of rising) if (e in next) next[e] = next[e] + 1;
         return next;
       });
     }
+    prevErrorsRef.current = new Set(data.errors);
 
     const sig = data.errors.join(",");
     const tcStr = tcString(data);
@@ -1964,6 +1981,7 @@ export default function SMPTEAnalyzer() {
     setErrorCount(0);
     setErrorCounts({ CLIP:0, HOT:0, LOW:0, DROPOUT:0, NOISE:0, DF_INVALID:0, AUDIO_GAP:0 });
     lastErrSigRef.current = "";
+    prevErrorsRef.current = new Set();
     currentSigTicksRef.current = 0;
     currentSigFlushTickRef.current = 0;
     sessionStartRef.current = Date.now();
@@ -1973,6 +1991,7 @@ export default function SMPTEAnalyzer() {
   function clearErrorCount() {
     setErrorCount(0);
     setErrorCounts({ CLIP:0, HOT:0, LOW:0, DROPOUT:0, NOISE:0, DF_INVALID:0, AUDIO_GAP:0 });
+    prevErrorsRef.current = new Set();
   }
 
   function downloadFile(name, mime, content) {
@@ -2957,7 +2976,7 @@ export default function SMPTEAnalyzer() {
             <span style={{ fontSize:11, color:"#ff9900", letterSpacing:3 }}>SESSION LOG</span>
           </div>
           <div style={{ fontSize:11, color:"#555", letterSpacing:2 }}>
-            {sessionLog.length} ENTR{sessionLog.length === 1 ? "Y" : "IES"} · {errorCount} ERROR TICKS · {frameCount} FRAMES
+            {sessionLog.length} ENTR{sessionLog.length === 1 ? "Y" : "IES"} · {errorCount} ERRORS · {frameCount} FRAMES
           </div>
           <div style={{ marginLeft:"auto", display:"flex", gap:8 }}>
             {[
