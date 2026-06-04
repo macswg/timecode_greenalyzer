@@ -6,6 +6,14 @@ This tool reads **LTC only**. VITC (vertical interval timecode) and ATC (ancilla
 
 For a full list of every on-screen indicator and where its value comes from, see [`INDICATORS.md`](INDICATORS.md).
 
+![The analyzer locked to a 29.97 DF source — decoded timecode, signal-level meters, rate detection with confidence, and the live 80-bit frame-integrity map.](docs/images/tc_running.png)
+
+<p align="center"><em>Locked to a 29.97 DF source: decoded timecode, RMS/peak meters, rate detection with confidence, and the live 80-bit frame map.</em></p>
+
+When there's no valid LTC on the selected input, the display goes red, confidence drops to zero, and `LIVE INPUT STATUS` reads `NO SIGNAL`:
+
+![The analyzer with no valid LTC — red timecode, 0% confidence, NO SIGNAL status.](docs/images/tc_lost.png)
+
 > ## ⚠️ Not for show-cue triggering
 >
 > This tool is for **viewing and analyzing** incoming timecode. It is **not** a show-control timecode source.
