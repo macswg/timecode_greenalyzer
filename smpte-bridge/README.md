@@ -45,6 +45,10 @@ The viewer needs no audio input of its own — it's purely a readout of whatever
 the analyzer is currently publishing. Drop-frame rates render with `;` and an
 orange rate label; non-drop with `:` and blue, matching the analyzer.
 
+<p align="center"><img src="../docs/images/tc_mobile.png" alt="The phone viewer on mobile — running timecode, level/drift/SNR readouts, subscriber count, and a live mirror of the analyzer's session log." width="300"></p>
+
+<p align="center"><em>The phone viewer mirroring a live 29.97 DF feed, including the analyzer's session log.</em></p>
+
 ## Message types
 
 - `{"type":"tc", t, seq, hh, mm, ss, ff, rate, dropFrame, carrierRate, cadenceFps,

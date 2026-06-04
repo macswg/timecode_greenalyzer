@@ -6,6 +6,14 @@ This tool reads **LTC only**. VITC (vertical interval timecode) and ATC (ancilla
 
 For a full list of every on-screen indicator and where its value comes from, see [`INDICATORS.md`](INDICATORS.md).
 
+![The analyzer locked to a 29.97 DF source — decoded timecode, signal-level meters, rate detection with confidence, and the live 80-bit frame-integrity map.](docs/images/tc_running.png)
+
+<p align="center"><em>Locked to a 29.97 DF source: decoded timecode, RMS/peak meters, rate detection with confidence, and the live 80-bit frame map.</em></p>
+
+When there's no valid LTC on the selected input, the display goes red, confidence drops to zero, and `LIVE INPUT STATUS` reads `NO SIGNAL`:
+
+![The analyzer with no valid LTC — red timecode, 0% confidence, NO SIGNAL status.](docs/images/tc_lost.png)
+
 > ## ⚠️ Not for show-cue triggering
 >
 > This tool is for **viewing and analyzing** incoming timecode. It is **not** a show-control timecode source.
@@ -68,6 +76,12 @@ npm start
 Listens on `:8765` by default. Set the `PORT` environment variable to override. See `smpte-bridge/README.md` for endpoints and message types.
 
 To connect the analyzer to the bridge, enter the WebSocket URL (`ws://localhost:8765/ingest`) in the API PUBLISHER section of the UI and click PUBLISH.
+
+Once published, open the bridge's `/` in any browser (including a phone over Tailscale) for a read-only mirror of the running timecode and the analyzer's session log:
+
+<p align="center"><img src="docs/images/tc_mobile.png" alt="The bridge phone viewer on mobile — running timecode, level/drift/SNR readouts, subscriber count, and a live mirror of the analyzer's session log." width="300"></p>
+
+<p align="center"><em>The phone viewer mirroring a live 29.97 DF feed. See <a href="smpte-bridge/README.md">smpte-bridge/README.md</a> for details.</em></p>
 
 ---
 
