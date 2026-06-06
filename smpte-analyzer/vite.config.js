@@ -17,7 +17,10 @@ const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url)))
 const { sha, count } = gitInfo();
 
 // https://vite.dev/config/
-export default defineConfig({
+export default defineConfig(({ command }) => ({
+  // GitHub Pages serves this project site from a subpath; dev stays at root so
+  // `npm run dev` keeps working at http://localhost:5173/.
+  base: command === 'build' ? '/timecode_greenalyzer/' : '/',
   plugins: [react()],
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
@@ -30,4 +33,4 @@ export default defineConfig({
     // from the default `npm test`. Run them with `npm run test:manual`.
     exclude: [...configDefaults.exclude, 'test/manual/**'],
   },
-})
+}))

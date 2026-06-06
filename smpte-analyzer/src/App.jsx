@@ -1513,7 +1513,7 @@ export default function SMPTEAnalyzer() {
       return audioCtxRef.current;
     }
     const ctx = new AudioContext();
-    await ctx.audioWorklet.addModule("/ltc-worklet.js");
+    await ctx.audioWorklet.addModule(`${import.meta.env.BASE_URL}ltc-worklet.js`);
     audioCtxRef.current = ctx;
     sampleRateRef.current = ctx.sampleRate;
     return ctx;

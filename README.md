@@ -8,6 +8,16 @@ This tool reads **LTC only**. VITC (vertical interval timecode) and ATC (ancilla
 
 For a full list of every on-screen indicator and where its value comes from, see [`INDICATORS.md`](INDICATORS.md).
 
+## ▶ Use it now — no install
+
+**[https://macswg.github.io/timecode_greenalyzer/](https://macswg.github.io/timecode_greenalyzer/)**
+
+Open that link in **Chrome, Edge, or Safari** and click **Allow** when the browser asks for microphone access — that's it, nothing to download or install. Everything runs locally in your browser; no audio leaves your machine.
+
+To analyze a real LTC source, connect a timecode output to an audio interface and pick that interface in the device menu inside the app. You can also drag an audio file onto the AUDIO INPUT panel to analyze a recording.
+
+> Running from source instead? See [Running the Analyzer](#running-the-analyzer) below.
+
 ![The analyzer locked to a 29.97 DF source — decoded timecode, the signal-level meter, rate detection with confidence, and the live 80-bit frame-integrity map.](docs/images/tc_running.png)
 
 <p align="center"><em>Locked to a 29.97 DF source: decoded timecode, RMS/peak meters, rate detection with confidence, and the live 80-bit frame map.</em></p>
@@ -49,7 +59,9 @@ timecode_greenalyzer/
 
 ---
 
-## Running the Analyzer
+## Running the Analyzer (from source)
+
+Most people don't need this — just use the [hosted app](#-use-it-now--no-install). Build from source if you want to modify it or run a private copy.
 
 **Prerequisites:** Node.js 18 or later
 
@@ -63,11 +75,24 @@ Open `http://localhost:5173` in your browser. The app immediately attempts to op
 
 To use a real LTC source: connect a timecode output to an audio interface, then select that interface in the device picker inside the app.
 
+### Hosting your own copy
+
+The analyzer is a fully static, client-side app. Pushing to `main` auto-builds and publishes it to GitHub Pages via [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) — a one-time **Settings → Pages → Source: GitHub Actions** is required to enable it. If you fork it under a different repo name, update `base` in [`smpte-analyzer/vite.config.js`](smpte-analyzer/vite.config.js) to match (`/<your-repo-name>/`). To build manually for any static host: `npm run build` produces a `dist/` folder.
+
 ---
 
 ## Running the Bridge Sidecar (optional)
 
 The bridge is only needed if you want to forward the timecode feed to other applications on the network.
+
+**With Docker (one command):**
+
+```bash
+cd smpte-bridge
+docker compose up -d
+```
+
+**Or with Node directly:**
 
 ```bash
 cd smpte-bridge
@@ -78,6 +103,8 @@ npm start
 Listens on `:8765` by default. Set the `PORT` environment variable to override. See `smpte-bridge/README.md` for endpoints and message types.
 
 To connect the analyzer to the bridge, enter the WebSocket URL (`ws://localhost:8765/ingest`) in the API PUBLISHER section of the UI and click PUBLISH.
+
+> **Using the [hosted analyzer](#-use-it-now--no-install) with the bridge?** The hosted page is served over HTTPS, so it can only reach a bridge on **your own machine** (`ws://localhost:8765/ingest` — browsers treat localhost as secure). Pointing it at a bridge on *another* machine (e.g. a Tailscale IP) is blocked as mixed content and needs `wss://`. See [`smpte-bridge/README.md`](smpte-bridge/README.md) for the options.
 
 Once published, open the bridge's `/` in any browser (including a phone over Tailscale) for a read-only mirror of the running timecode and the analyzer's session log:
 
