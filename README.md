@@ -342,7 +342,7 @@ Every tick emits a `{type:"tc"}` message. Each error-state transition emits a `{
 
 ## License
 
-Released under the [MIT License](LICENSE) © 2026 Sean Green. You are free to use, modify, and redistribute the code, including in commercial and proprietary work, provided the copyright notice and license text are retained in copies or substantial portions of the software.
+Released under the [Apache License 2.0](LICENSE) © 2026 Sean Green. Originally created and built by Sean Green. You are free to use, modify, and redistribute the code — including in commercial and proprietary work — provided you retain the copyright notice, the [`NOTICE`](NOTICE) file, the license text, and a statement of any changes you make, per the terms of the license.
 
 ---
 

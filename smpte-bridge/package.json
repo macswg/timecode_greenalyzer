@@ -1,7 +1,9 @@
 {
   "name": "smpte-bridge",
-  "version": "1.7.3",
+  "version": "1.7.7",
   "private": true,
+  "author": "Sean Green",
+  "license": "Apache-2.0",
   "type": "module",
   "description": "Fan-out sidecar for the SMPTE timecode analyzer. Ingests timecode from the browser over WebSocket and rebroadcasts to subscribers (Phase 1: WS only; OSC/Art-Net to follow).",
   "scripts": {

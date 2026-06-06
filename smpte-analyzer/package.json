@@ -1,7 +1,9 @@
 {
   "name": "smpte-analyzer",
   "private": true,
-  "version": "1.7.6",
+  "version": "1.7.7",
+  "author": "Sean Green",
+  "license": "Apache-2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
