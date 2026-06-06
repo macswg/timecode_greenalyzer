@@ -5,7 +5,9 @@
 // Future phases will fan out to OSC and Art-Net from the same ingest stream.
 
 import http from "node:http";
+import https from "node:https";
 import { readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, normalize, extname } from "node:path";
 import { WebSocketServer } from "ws";
@@ -13,9 +15,43 @@ import { WebSocketServer } from "ws";
 const PORT = Number(process.env.PORT || 8765);
 // Always bind localhost so the same-machine analyzer works; HOSTS adds
 // extra interfaces (e.g. the Tailscale IP) without exposing all of LAN.
+// A wildcard host (0.0.0.0 / ::, used by the Docker image) already covers
+// localhost and every interface, so bind it alone — binding the wildcard and
+// 127.0.0.1 on the same port collides (EADDRINUSE).
 const EXTRA_HOSTS = (process.env.HOSTS || process.env.HOST || "")
   .split(",").map(s => s.trim()).filter(Boolean);
-const HOSTS = ["127.0.0.1", ...EXTRA_HOSTS.filter(h => h !== "127.0.0.1")];
+const wildcard = EXTRA_HOSTS.find(h => h === "0.0.0.0" || h === "::");
+const HOSTS = wildcard
+  ? [wildcard]
+  : ["127.0.0.1", ...EXTRA_HOSTS.filter(h => h !== "127.0.0.1")];
+
+// Optional bring-your-own-cert TLS. When BOTH TLS_CERT and TLS_KEY point to
+// readable PEM files, the bridge serves https/wss instead of http/ws. We never
+// obtain or renew certs — point these at `tailscale cert` output, Let's Encrypt
+// files, or any cert you already have. Default (vars unset) is plain http/ws,
+// byte-for-byte the previous behaviour. NOTE: TLS is per-server, so enabling it
+// makes this instance wss-only — plain ws://localhost will not connect to it.
+function loadTlsConfig() {
+  const certPath = process.env.TLS_CERT;
+  const keyPath = process.env.TLS_KEY;
+  if (!certPath && !keyPath) return null;                 // not requested
+  if (!certPath || !keyPath) {                            // half-configured → fail loud
+    console.error("[bridge] TLS misconfigured: set BOTH TLS_CERT and TLS_KEY (or neither). Refusing to start.");
+    process.exit(1);
+  }
+  try {
+    return { cert: readFileSync(certPath), key: readFileSync(keyPath) };
+  } catch (e) {
+    // Fail loud rather than silently falling back to insecure http.
+    console.error(`[bridge] TLS cert/key could not be read (${e.message}). Refusing to start.`);
+    process.exit(1);
+  }
+}
+
+const tls = loadTlsConfig();
+const SCHEME = tls ? "https" : "http";
+const WS_SCHEME = tls ? "wss" : "ws";
+
 const PUBLIC_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "public");
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -91,7 +127,7 @@ function handleUpgrade(req, socket, head) {
 }
 
 const servers = HOSTS.map((host) => {
-  const s = http.createServer(handleRequest);
+  const s = tls ? https.createServer(tls, handleRequest) : http.createServer(handleRequest);
   s.on("upgrade", handleUpgrade);
   return { host, server: s };
 });
@@ -149,10 +185,11 @@ for (const { host, server } of servers) {
     console.error(`[bridge] ${host}:${PORT} failed: ${err.message}`);
   });
   server.listen(PORT, host, () => {
-    console.log(`smpte-bridge listening on ${host}:${PORT}`);
+    console.log(`smpte-bridge listening on ${SCHEME}://${host}:${PORT}`);
   });
 }
-console.log(`  publish   →  ws://<host>:${PORT}/ingest`);
-console.log(`  subscribe →  ws://<host>:${PORT}/subscribe`);
-console.log(`  status    →  http://<host>:${PORT}/status`);
-console.log(`  viewer    →  http://<host>:${PORT}/`);
+if (tls) console.log("[bridge] TLS enabled — connect with wss:// (plain ws:// will not work on this instance).");
+console.log(`  publish   →  ${WS_SCHEME}://<host>:${PORT}/ingest`);
+console.log(`  subscribe →  ${WS_SCHEME}://<host>:${PORT}/subscribe`);
+console.log(`  status    →  ${SCHEME}://<host>:${PORT}/status`);
+console.log(`  viewer    →  ${SCHEME}://<host>:${PORT}/`);

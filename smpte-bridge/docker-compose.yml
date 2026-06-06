@@ -1,0 +1,11 @@
+services:
+  bridge:
+    build: .
+    image: smpte-bridge
+    ports:
+      - "8765:8765"
+    environment:
+      # Bind all interfaces inside the container so the mapped port is reachable.
+      HOSTS: "0.0.0.0"
+      # PORT: "8765"   # uncomment to override the default
+    restart: unless-stopped

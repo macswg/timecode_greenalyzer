@@ -6,6 +6,19 @@ feed to any number of subscribers.
 
 ## Run
 
+### With Docker (recommended — no Node toolchain needed)
+
+```
+cd smpte-bridge
+docker compose up -d
+```
+
+The container binds all interfaces (`HOSTS=0.0.0.0`) and maps `:8765` to the
+host. Stop it with `docker compose down`. Override the port by editing
+`docker-compose.yml` (uncomment `PORT`) or set it in the environment.
+
+### With Node directly
+
 ```
 cd smpte-bridge
 npm install
@@ -15,8 +28,70 @@ npm start
 `127.0.0.1` is always bound so a same-machine analyzer can reach
 `ws://localhost:8765/ingest`. `HOSTS` (comma-separated) adds extra interfaces
 without exposing all of LAN; `HOST` is accepted as an alias. `npm start` sets
-`HOSTS=$(tailscale ip -4)` so the bridge is reachable over Tailscale too.
-Override port with `PORT=9000`.
+`HOSTS=$(tailscale ip -4)` so the bridge is reachable over Tailscale too. Pass a
+wildcard (`HOSTS=0.0.0.0`, as the Docker image does) to bind every interface;
+the wildcard already covers localhost, so it is bound alone. Override port with
+`PORT=9000`.
+
+## Connecting from the hosted analyzer (HTTPS) — mixed content
+
+The [hosted analyzer](https://macswg.github.io/timecode_greenalyzer/) is served
+over **HTTPS**. Browsers allow an HTTPS page to open an insecure `ws://`
+connection **only to localhost**, so:
+
+- **Bridge on your own machine:** works as-is — publish to
+  `ws://localhost:8765/ingest` from the hosted page.
+- **Bridge on another machine** (e.g. a Tailscale IP): blocked as mixed content.
+  You need a secure `wss://` connection. Pick one of:
+  1. Run the analyzer from source over `http://localhost:5173` instead of the
+     hosted page — the mixed-content rule doesn't apply, so plain `ws://<ip>`
+     works; **or**
+  2. Enable the bridge's built-in TLS (see below) and connect with
+     `wss://<host>:8765/ingest`; **or**
+  3. Put a TLS reverse proxy in front of the bridge (Caddy, nginx, or a Tailscale
+     Funnel / cloud host) and connect with `wss://<host>/ingest`.
+
+## TLS / `wss://` (bring your own cert)
+
+The bridge can serve `https`/`wss` directly. Set **both** `TLS_CERT` and
+`TLS_KEY` to PEM file paths and it switches from `http`/`ws` to `https`/`wss`:
+
+```
+TLS_CERT=/path/cert.pem TLS_KEY=/path/key.pem node src/index.js
+```
+
+The bridge **uses** a cert you provide — it never obtains or renews one. Good
+sources:
+
+- **Tailscale:** `tailscale cert <name>.ts.net` issues a real, browser-trusted
+  Let's Encrypt cert for your tailnet name. This is the easiest path to a working
+  `wss://` from the hosted analyzer to a remote bridge.
+- **Let's Encrypt / any CA:** point the vars at your existing fullchain + key.
+- A **self-signed** cert works too, but browsers won't trust it until you install
+  it on each device — fine for testing, awkward for a phone.
+
+Guardrails (by design):
+
+- **Default is unchanged.** With neither var set, the bridge serves plain
+  `http`/`ws` exactly as before — non-TLS users feel nothing.
+- **Setting only one of the two** (or pointing at an unreadable file) makes the
+  bridge **refuse to start** with a clear error, rather than silently falling
+  back to insecure `http`.
+- **TLS is per-instance and `wss`-only.** Once enabled, plain `ws://localhost`
+  will not connect to that instance — switch the analyzer's publisher URL to
+  `wss://`. The startup banner prints the active scheme.
+
+With Docker, mount the cert files in and set the vars:
+
+```yaml
+# docker-compose.yml (override)
+environment:
+  HOSTS: "0.0.0.0"
+  TLS_CERT: "/certs/cert.pem"
+  TLS_KEY: "/certs/key.pem"
+volumes:
+  - /path/to/certs:/certs:ro
+```
 
 ## Endpoints
 
