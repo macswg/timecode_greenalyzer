@@ -63,7 +63,7 @@ timecode_greenalyzer/
 
 Most people don't need this — just use the [hosted app](#-use-it-now--no-install). Build from source if you want to modify it or run a private copy.
 
-**Prerequisites:** Node.js 18 or later
+**Prerequisites:** Node.js 20 or later (Vite 8 requires 20.19+ / 22.12+)
 
 ```bash
 cd smpte-analyzer
