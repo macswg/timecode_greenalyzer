@@ -2,7 +2,7 @@
 
 A browser-based Linear Timecode (LTC) analyzer built to the SMPTE ST 12-1:2014 specification. It decodes and displays timecode from a live audio input, detects frame rate and drop-frame mode automatically, measures signal level, and flags error conditions including clipping, low level, noise, and dropout.
 
-This tool reads **LTC only**. VITC (vertical interval timecode) and ATC (ancillary timecode embedded in SDI/HDMI) carry timecode in video, not audio, and cannot be analyzed here.
+This tool reads **LTC only**. VITC (vertical interval timecode) and ATC (ancillary timecode embedded in SDI/HDMI) cannot be analyzed here.
 
 For a full list of every on-screen indicator and where its value comes from, see [`INDICATORS.md`](INDICATORS.md).
 
