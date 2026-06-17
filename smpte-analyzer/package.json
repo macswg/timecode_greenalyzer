@@ -11,7 +11,9 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:manual": "vitest run --config vitest.manual.config.js"
+    "test:manual": "vitest run --config vitest.manual.config.js",
+    "gen:ltc": "node --import ./tools/register-loader.mjs tools/gen-ltc-wav.mjs",
+    "gen:halfhour": "node --import ./tools/register-loader.mjs tools/gen-halfhour-30nd.mjs"
   },
   "dependencies": {
     "react": "^19.2.6",

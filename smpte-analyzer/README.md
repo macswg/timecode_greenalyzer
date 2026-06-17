@@ -13,6 +13,20 @@ npm install
 npm run dev   # http://localhost:5173
 ```
 
+### Generating test LTC files
+
+Need standalone timecode WAV files for playback or for the **ANALYZE FILE…** drop
+zone? The [`tools/`](tools/README.md) folder has one-off generators that reuse
+the app's encoder:
+
+```bash
+npm run gen:ltc        # one sample file per common rate -> tools/out/
+npm run gen:halfhour   # 30 NDF series, 10 min each on every half-hour -> tools/generated_tc/
+```
+
+See [`tools/README.md`](tools/README.md) for details and how to customize rate,
+duration, start time, and level.
+
 ### Build / deploy
 
 This is a fully static, client-side app. `npm run build` emits a `dist/` folder

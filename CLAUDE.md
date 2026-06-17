@@ -33,7 +33,9 @@ Correctness checks are manual: open the browser, grant microphone access, feed r
 | `smpte-analyzer/src/publisher.js` | Transport: reconnecting WebSocket `Publisher` class |
 | `smpte-analyzer/src/tickWorker.js` | Tick source: Web Worker that fires `{type:"tick"}` at ~30 Hz, immune to tab-backgrounding throttle |
 | `smpte-analyzer/public/ltc-worklet.js` | Audio thread: `LtcCapture` AudioWorklet that forwards every sample to the main thread (no drops) and stamps `performance.now()` at chunk start + chunk end so the decoder can recover true wall-clock arrival time per frame independent of ADC sample-clock drift |
+| `smpte-analyzer/src/ltcSynth.js` | LTC waveform synthesizer: `buildLtcAudioBuffer()` (biphase-encoded LTC at a chosen carrier rate carrying a count from a chosen cadence — deliberately separable to produce out-of-spec material), `encodeFrameBits()` (80-bit frame, `wide`/`framepair` 50-60 conventions), `nextTc()`. Used by the in-app generator and by the `tools/` file generators. |
 | `smpte-bridge/src/index.js` | WS fan-out: `/ingest` (single publisher), `/subscribe` (multi-subscriber broadcast), `/status` HTTP snapshot |
+| `smpte-analyzer/tools/` | Dev-only one-off LTC WAV file generators (not part of the app build). `gen-ltc-wav.mjs` (`npm run gen:ltc`, one sample per rate → `out/`) and `gen-halfhour-30nd.mjs` (`npm run gen:halfhour`, 30 NDF half-hour series → `generated_tc/`) reuse `ltcSynth.js` via `wav.mjs` + the `register-loader.mjs`/`extless-loader.mjs` extensionless-import hook; `verify-*.mjs` round-trip-decode the output. Output dirs are gitignored. See `tools/README.md`. |
 
 ## Architecture
 

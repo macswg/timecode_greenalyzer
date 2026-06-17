@@ -25,3 +25,7 @@ dist-ssr
 
 # On-demand harness generated outputs (test/manual/*.test.js write these)
 test/manual/*.json
+
+# Generated LTC WAV files (tools/gen-*.mjs write these — large, not committed)
+tools/out/
+tools/generated_tc/
