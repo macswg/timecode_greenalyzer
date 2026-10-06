@@ -2185,22 +2185,12 @@ export default function SMPTEAnalyzer() {
           ○ STARTING — requesting audio input…
         </div>
       )}
-      {!bootstrapping && simMode && (
-        <div style={{
-          fontSize:12, fontFamily:"monospace", letterSpacing:4,
-          color:"#d946ef", textShadow:"0 0 8px rgba(217,70,239,0.5)",
-          animation:"blink 1.4s infinite",
-          marginBottom:6,
-        }}>
-          ▲ SIMULATING CODE
-        </div>
-      )}
       <div style={{
         border: !bootstrapping && simMode ? "1px solid #d946ef" : "1px solid #1a1a1a",
         boxShadow: !bootstrapping && simMode ? "0 0 16px rgba(217,70,239,0.25), inset 0 0 12px rgba(217,70,239,0.08)" : "none",
         borderRadius:4,
         padding:"24px 28px",
-        marginBottom:16,
+        marginBottom: !bootstrapping && simMode ? 6 : 16,
         background:"linear-gradient(180deg, #0a0a0a 0%, #050505 100%)",
         position:"relative",
         overflow:"hidden",
@@ -2322,6 +2312,16 @@ export default function SMPTEAnalyzer() {
           })()}
         </div>
       </div>
+      {!bootstrapping && simMode && (
+        <div style={{
+          fontSize:12, fontFamily:"monospace", letterSpacing:4,
+          color:"#d946ef", textShadow:"0 0 8px rgba(217,70,239,0.5)",
+          animation:"blink 1.4s infinite",
+          marginBottom:16,
+        }}>
+          ▲ SIMULATING CODE
+        </div>
+      )}
 
       {/* Error Badges */}
       <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:16 }}>
