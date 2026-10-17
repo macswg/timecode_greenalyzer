@@ -1,6 +1,6 @@
 {
   "id": "./",
-  "name": "Timecode Greenalyzer — SMPTE LTC Analyzer",
+  "name": "SMPTE Timecode Greenalyzer",
   "short_name": "Greenalyzer",
   "description": "SMPTE ST 12-1 LTC timecode analyzer that runs entirely in the browser.",
   "start_url": "./",
