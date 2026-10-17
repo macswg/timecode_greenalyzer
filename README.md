@@ -16,6 +16,8 @@ Open that link in **Chrome, Edge, or Safari** and click **Allow** when the brows
 
 To analyze a real LTC source, connect a timecode output to an audio interface and pick that interface in the device menu inside the app. You can also drag an audio file onto the AUDIO INPUT panel to analyze a recording.
 
+**Want it in its own window?** In Chrome or Edge, click the **Install** icon at the right end of the address bar (or **⋮ → Cast, save, and share → Install page as app…**). It then launches from your Dock / Start menu / Launchpad as a standalone window with no browser tabs or toolbar, and keeps its microphone permission. In Safari (macOS Sonoma+), use **File → Add to Dock**.
+
 > Running from source instead? See [Running the Analyzer](#running-the-analyzer) below.
 
 ![The analyzer locked to a 29.97 DF source — decoded timecode, the signal-level meter, rate detection with confidence, and the live 80-bit frame-integrity map.](docs/images/tc_running.png)
