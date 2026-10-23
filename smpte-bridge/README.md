@@ -136,6 +136,22 @@ orange rate label; non-drop with `:` and blue, matching the analyzer.
   `fieldMarkBehavior` is `"TOGGLING"` / `"STATIC"` / `null` (50/60 frame-pair vs
   wide-LTC). `userBits` is an 8-char hex string (UB1..UB8). Fields with no value yet
   (e.g. before the carrier classifier commits) are `null`.
+
+  Extended fields (everything the analyzer UI shows):
+  `tc` (formatted string, `;` for DF), `colorFrame`, `thd` (%), `noiseFloor` (dB),
+  `confidence` (0–99.5, same as the RATE DETECTOR bar), `driftPpmSourceVsAdc`,
+  `captureClockErrorPpm` (host − ADC; > ±100 ppm suggests SRC/faulty interface),
+  `detectedRateKey` (null until carrier commit), `carrier` `{nominalFps, fractional,
+  committed, heldDuringSignalLoss, agreementCount, agreementsRequired, measuredFps,
+  sigmaPpm, windowFrames, windowSec, detectorFps}`, `cadence` `{fps, dropFrame,
+  dropFrameKnown, framesSeen, dfFlagMatches}`, `framesDecoded`, `bitErrors`
+  (lifetime decoder counters), `continuityBreaks60s`, `lastBreak` `{breakType,
+  delta, from, to, ageMs}`, `sampleRate` (AudioContext Hz).
+- `{"type":"carrier", t, seq, eventType, tc, fps, fractional, ...}` emitted on
+  carrier-classifier edges. `eventType` is `"MEASURING_COMMIT"`, `"RATE_CHANGE"`
+  (also carries `measuredFps, sigmaFps, windowFrames, windowSeconds,
+  previousFractional, previousNominalFps`) or `"DIVERGENCE"` (carries
+  `committedFractional, detectorFractional, detectorFps, detectorSigmaFps`).
 - `{"type":"error", t, seq, tc, rate, errors}` emitted once per error-set transition.
   `tc` is a formatted timecode string; `;` is used as the frame separator for drop-frame.
 - `{"type":"continuity", t, seq, breakType, delta, from, to, rate}` emitted when

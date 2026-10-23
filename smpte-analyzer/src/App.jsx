@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Publisher } from "./publisher";
+import { Recorder } from "./recorder";
 import { MultiRateDecoder, rateKeyToNominalFps, tcString } from "./ltcDecoder";
 import { framesToTc, isValidDropFrame } from "./dropFrame";
 import { buildLtcAudioBuffer } from "./ltcSynth";
@@ -778,6 +779,13 @@ export default function SMPTEAnalyzer() {
   const recentBreakTimesRef = useRef([]);
   const sessionStartRef = useRef(Date.now());
   const publisherRef = useRef(null);
+  // In-browser NDJSON recorder (recorder.js). Receives the same messages as
+  // the publisher via emitApi(), so recording works with no bridge running.
+  const recorderRef = useRef(null);
+  const emitApi = useCallback((payload) => {
+    publisherRef.current?.send(payload);
+    recorderRef.current?.write(payload);
+  }, []);
   const tickRef = useRef(null);
   const decoderRef = useRef(null);
   const workletNodeRef = useRef(null);
@@ -805,6 +813,7 @@ export default function SMPTEAnalyzer() {
   // Collapsible left-column / status sections (collapsed = hidden body, header only).
   const [audioCollapsed, setAudioCollapsed] = useState(false);
   const [apiCollapsed, setApiCollapsed] = useState(false);
+  const [recState, setRecState] = useState({ active: false });
   const [liveStatusCollapsed, setLiveStatusCollapsed] = useState(false);
   const [sessionLogCollapsed, setSessionLogCollapsed] = useState(false);
   const [measuredSampleRate, setMeasuredSampleRate] = useState(null);
@@ -1168,8 +1177,8 @@ export default function SMPTEAnalyzer() {
       currentSigTicksRef.current = 0;
       currentSigFlushTickRef.current = 0;
     }
-    if (sig !== lastErrSigRef.current && publisherRef.current && sig) {
-      publisherRef.current.send({
+    if (sig !== lastErrSigRef.current && sig) {
+      emitApi({
         type: "error", t: Date.now(), tc: tcStr,
         rate: rateKey, errors: [...data.errors],
       });
@@ -1264,6 +1273,9 @@ export default function SMPTEAnalyzer() {
     const ce = data.lastCarrierEvent;
     if (useRealAudio && ce && ce.t !== lastCarrierEventTRef.current) {
       lastCarrierEventTRef.current = ce.t;
+      // Edge event with the decoder's raw fields; perf-clock `t` swapped for
+      // epoch ms per the wire-timestamp convention (publisher.js header).
+      emitApi({ ...ce, type: "carrier", eventType: ce.type, t: Date.now(), tc: tcStr });
       const fpsLabel = ce.fps != null
         ? (ce.fractional ? `${ce.fps}/1.001` : `${ce.fps}`)
         : "—";
@@ -1338,17 +1350,17 @@ export default function SMPTEAnalyzer() {
         snr: Number.isFinite(data.snr) ? +data.snr.toFixed(1) : null,
         source: srcLabel,
       });
-      if (publisherRef.current) {
-        publisherRef.current.send({
-          type: "continuity", t: Date.now(),
-          breakType: lb.type, delta: lb.delta,
-          from: lb.from, to: lb.to, rate: rateKey,
-        });
-      }
+      emitApi({
+        type: "continuity", t: Date.now(),
+        breakType: lb.type, delta: lb.delta,
+        from: lb.from, to: lb.to, rate: rateKey,
+      });
     }
 
-    if (publisherRef.current) {
-      publisherRef.current.send({
+    if (publisherRef.current || recorderRef.current) {
+      const rnd = (v, d) => Number.isFinite(v) ? +v.toFixed(d) : null;
+      const obs = data.carrierObs;
+      emitApi({
         type: "tc", t: Date.now(),
         hh: data.hh, mm: data.mm, ss: data.ss, ff: data.ff,
         rate: rateKey, dropFrame: data.dropFrame,
@@ -1375,6 +1387,51 @@ export default function SMPTEAnalyzer() {
         dropoutPct: Number.isFinite(data.dropoutPct) ? +data.dropoutPct.toFixed(2) : null,
         snr:        Number.isFinite(data.snr)        ? +data.snr.toFixed(1)        : null,
         errors: data.errors,
+        // Extended measurement set — everything the UI panels show, so a
+        // subscriber can capture the full analysis without scraping the page.
+        // Additive: fields above keep their names/semantics for compat.
+        tc: tcStr,
+        colorFrame: !!data.colorFrame,
+        thd:        rnd(data.thd, 2),
+        noiseFloor: rnd(data.noiseFloor, 1),
+        confidence: useRealAudio
+          ? (data.ltcLocked
+              ? (Number.isFinite(data.dropoutPct) ? Math.max(0, Math.min(99.5, +(100 - data.dropoutPct).toFixed(1))) : 25)
+              : 0)
+          : Math.max(0, 100 - (data.errors?.length ?? 0) * 18),
+        driftPpmSourceVsAdc:  rnd(data.driftPpmSourceVsAdc, 2),
+        captureClockErrorPpm: rnd(data.captureClockErrorPpm, 2),
+        detectedRateKey: data.detectedRateKey ?? null,
+        carrier: obs ? {
+          nominalFps: obs.nominalFps ?? null,
+          fractional: obs.fractional ?? null,
+          committed: obs.fractional != null,
+          heldDuringSignalLoss: !!obs.heldDuringSignalLoss,
+          agreementCount: obs.agreementCount ?? 0,
+          agreementsRequired: obs.agreementsRequired ?? null,
+          measuredFps: rnd(obs.stable?.fps, 6),
+          sigmaPpm: obs.stable?.sigmaFps != null && obs.nominalFps
+            ? rnd(obs.stable.sigmaFps * 1e6 / obs.nominalFps, 3) : null,
+          windowFrames: obs.stable?.n ?? null,
+          windowSec: rnd(obs.stable?.spanSec, 2),
+          detectorFps: rnd(obs.detector?.fps, 6),
+        } : null,
+        cadence: data.cadence ? {
+          fps: data.cadence.fps,
+          dropFrame: data.cadence.dropFrame,
+          dropFrameKnown: data.cadence.dropFrameKnown,
+          framesSeen: data.cadence.framesSeen,
+          dfFlagMatches: data.cadence.dfFlagMatches ?? null,
+        } : null,
+        framesDecoded: data.framesDecoded ?? null,
+        bitErrors: data.bitErrors ?? null,
+        continuityBreaks60s: recentBreakTimesRef.current.filter(bt => bt >= performance.now() - 60000).length,
+        lastBreak: data.lastBreak ? {
+          breakType: data.lastBreak.type, delta: data.lastBreak.delta,
+          from: data.lastBreak.from, to: data.lastBreak.to,
+          ageMs: Math.round(performance.now() - data.lastBreak.t),
+        } : null,
+        sampleRate: sampleRateRef.current ?? null,
       });
     }
 
@@ -1391,7 +1448,7 @@ export default function SMPTEAnalyzer() {
       peakDecayRef.current = Math.max(peakDecayRef.current - 0.67, data.peakDbFS);
     }
     setPeakHold(peakDecayRef.current);
-  }, [rateKey, levelDbFS, noiseLevel, dropoutProb, useRealAudio, bootstrapping, playingFile]);
+  }, [rateKey, levelDbFS, noiseLevel, dropoutProb, useRealAudio, bootstrapping, playingFile, emitApi]);
 
   useEffect(() => { tickRef.current = tick; }, [tick]);
 
@@ -1493,6 +1550,48 @@ export default function SMPTEAnalyzer() {
     }, 750);
     return () => clearInterval(id);
   }, [apiEnabled]);
+
+  // Recorder start/stop. The file opens with a `session` header line and ends
+  // with one final `log` snapshot (the whole session log incl. notes) rather
+  // than recording every 750 ms log republish, which would repeat the full
+  // array thousands of times.
+  async function startRecording() {
+    if (recorderRef.current) return;
+    const d = new Date();
+    const pad = n => String(n).padStart(2, "0");
+    const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+    const r = new Recorder({ onProgress: setRecState });
+    try {
+      await r.start({
+        suggestedName: `greenalyzer-${stamp}.ndjson`,
+        header: {
+          type: "session", t: Date.now(),
+          app: "smpte-timecode-greenalyzer", version: __APP_VERSION__, commit: __GIT_COMMIT__,
+          sampleRate: sampleRateRef.current ?? null,
+          userAgent: navigator.userAgent,
+        },
+      });
+    } catch (e) {
+      if (e?.name !== "AbortError") setRecState({ active: false, error: String(e?.message ?? e) });
+      return;
+    }
+    recorderRef.current = r;
+  }
+
+  async function stopRecording() {
+    const r = recorderRef.current;
+    if (!r) return;
+    recorderRef.current = null;
+    await r.stop([{ type: "log", t: Date.now(), entries: sessionLogTxRef.current }]);
+  }
+
+  // Closing the tab mid-recording loses it (see recorder.js), so ask first.
+  useEffect(() => {
+    if (!recState.active) return;
+    const guard = (e) => { e.preventDefault(); e.returnValue = ""; };
+    window.addEventListener("beforeunload", guard);
+    return () => window.removeEventListener("beforeunload", guard);
+  }, [recState.active]);
 
   async function refreshAudioDevices() {
     try {
@@ -3095,6 +3194,27 @@ export default function SMPTEAnalyzer() {
             : "○ OFFLINE"}
         </div>
         </>)}
+      </div>
+
+      {/* Recorder — captures the API message stream to an NDJSON file locally */}
+      <div style={{ marginTop:12, ...PANEL, padding:12, display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
+        <span style={{ fontSize:11, color:"#ff9900", letterSpacing:3 }}>RECORDER</span>
+        {!recState.active ? (
+          <button onClick={startRecording} style={buttonStyle("#ff3b3b")}>● RECORD</button>
+        ) : (
+          <button onClick={stopRecording} style={buttonStyle("#00ff88")}>■ STOP &amp; SAVE</button>
+        )}
+        <div style={{ fontSize:11, fontFamily:"monospace", letterSpacing:2, color: recState.active ? "#ff3b3b" : "#444" }}>
+          {recState.active ? (() => {
+            const sec = Math.floor((Date.now() - recState.startedAt) / 1000);
+            const hms = [Math.floor(sec / 3600), Math.floor(sec / 60) % 60, sec % 60].map(n => String(n).padStart(2, "0")).join(":");
+            return `● REC ${hms} · ${recState.lines.toLocaleString()} LINES · ${(recState.bytes / 1e6).toFixed(1)} MB → ${recState.filename}`
+              + (recState.mode === "memory" ? " (IN MEMORY — SAVES ON STOP)" : "");
+          })() : recState.filename ? `○ SAVED ${recState.lines.toLocaleString()} LINES → ${recState.filename}` : "○ NOT RECORDING"}
+        </div>
+        {recState.error && (
+          <div style={{ fontSize:11, fontFamily:"monospace", color:"#ff3b3b" }}>⚠ {recState.error}</div>
+        )}
       </div>
 
       {/* SMPTE Spec Reference — bottom of page */}

@@ -367,7 +367,21 @@ The timecode card gets a fuchsia outline and a blinking **SIMULATING CODE** indi
 
 The app can publish timecode frames to the `smpte-bridge` sidecar over WebSocket. Enter the bridge URL in the **API PUBLISHER** section and click **PUBLISH**. The publisher reconnects automatically with exponential back-off if the bridge is not running.
 
-Every tick emits a `{type:"tc"}` message. Each error-state transition emits a `{type:"error"}` message. Each continuity break emits a `{type:"continuity"}` message. See `smpte-bridge/README.md` for the full schema.
+Every tick emits a `{type:"tc"}` message. Each error-state transition emits a `{type:"error"}` message. Each continuity break emits a `{type:"continuity"}` message. Each carrier-classifier edge (commit / rate change / divergence) emits a `{type:"carrier"}` message. The `tc` message carries every measurement the UI shows (level, peak, SNR, THD, noise floor, both drift readouts, capture-clock error, carrier LSQ fit, cadence, counters, user bits). See `smpte-bridge/README.md` for the full schema.
+
+### Recorder (no bridge needed)
+
+The **RECORDER** panel, below the API publisher, saves that same message stream to a local NDJSON file (one JSON object per line). It needs no bridge, and you don't have to be publishing.
+
+1. Click **● RECORD**. In Chrome/Edge a save dialog picks the file (default name `greenalyzer-YYYYMMDD-HHMMSS.ndjson`). In Safari/Firefox the recording builds up in memory instead.
+2. Run your show or test. The panel shows elapsed time, line count, and size.
+3. Click **■ STOP & SAVE**. Chrome/Edge commit the file to the path you chose; Safari/Firefox download it.
+
+The file starts with a `{type:"session"}` header (app version, commit, sample rate, user agent), contains every `tc` / `error` / `continuity` / `carrier` message stamped with its own `seq`, and ends with one `{type:"log"}` snapshot of the full session log (including notes). Expect roughly 100+ MB per hour, since `tc` runs at ~30 Hz.
+
+> **Stop before closing the tab.** The browser only finalises the file on STOP, so closing or reloading mid-recording loses it. The page asks for confirmation if you try.
+
+Pull out events afterwards with `jq`, e.g. `jq -c 'select(.type=="continuity")' greenalyzer-*.ndjson`.
 
 ---
 
