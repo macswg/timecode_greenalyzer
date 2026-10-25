@@ -383,6 +383,8 @@ The file starts with a `{type:"session"}` header (app version, commit, sample ra
 
 Pull out events afterwards with `jq`, e.g. `jq -c 'select(.type=="continuity")' greenalyzer-*.ndjson`.
 
+**Recordings folder and remote start/stop.** In Chrome/Edge, **CHOOSE FOLDER…** sets a folder that each recording goes into as a new file, with no save dialog. **REMOTE: ON** lets other devices start and stop the recorder over HTTP or OSC, relayed by the OSC listener running on the same Mac. See [REMOTE_RECORD.md](REMOTE_RECORD.md).
+
 ---
 
 ## License

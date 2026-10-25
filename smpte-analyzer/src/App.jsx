@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Publisher } from "./publisher";
-import { Recorder } from "./recorder";
+import { Recorder, canPickFolder, pickFolder, savedFolder, folderPermission, allowFolder } from "./recorder";
+import { RemoteControl } from "./remoteControl";
 import { MultiRateDecoder, rateKeyToNominalFps, tcString } from "./ltcDecoder";
 import { framesToTc, isValidDropFrame } from "./dropFrame";
 import { buildLtcAudioBuffer } from "./ltcSynth";
@@ -814,6 +815,24 @@ export default function SMPTEAnalyzer() {
   const [audioCollapsed, setAudioCollapsed] = useState(false);
   const [apiCollapsed, setApiCollapsed] = useState(false);
   const [recState, setRecState] = useState({ active: false });
+  // The last recording's Recorder, kept after stop so remote status can report its file.
+  const lastRecorderRef = useRef(null);
+  const recStartingRef = useRef(false);
+  // Recordings folder (recorder.js pickFolder): with one, every recording gets
+  // its own file there with no save dialog, which a remote start needs.
+  // recDirRef holds it only while the browser allows writing to it.
+  const recDirRef = useRef(null);
+  const savedDirRef = useRef(null);
+  const [recDir, setRecDir] = useState({ name: null, needsAllow: false });
+  // Remote record start/stop through the OSC listener (remoteControl.js).
+  // Remembered per browser; off by default.
+  const [remoteEnabled, setRemoteEnabled] = useState(() => {
+    try { return localStorage.getItem("greenalyzer.remote") === "1"; } catch { return false; }
+  });
+  const [remoteUrl, setRemoteUrl] = useState(() => {
+    try { return localStorage.getItem("greenalyzer.remoteUrl") || "http://127.0.0.1:8415"; } catch { return "http://127.0.0.1:8415"; }
+  });
+  const [remoteState, setRemoteState] = useState("closed");
   const [liveStatusCollapsed, setLiveStatusCollapsed] = useState(false);
   const [sessionLogCollapsed, setSessionLogCollapsed] = useState(false);
   const [measuredSampleRate, setMeasuredSampleRate] = useState(null);
@@ -1554,28 +1573,41 @@ export default function SMPTEAnalyzer() {
   // Recorder start/stop. The file opens with a `session` header line and ends
   // with one final `log` snapshot (the whole session log incl. notes) rather
   // than recording every 750 ms log republish, which would repeat the full
-  // array thousands of times.
-  async function startRecording() {
-    if (recorderRef.current) return;
+  // array thousands of times. A remote start (remote: true) never shows the
+  // save dialog: it writes to the recordings folder, or records in memory.
+  async function startRecording({ label = "", remote = false } = {}) {
+    if (recorderRef.current || recStartingRef.current) return;
+    recStartingRef.current = true;
     const d = new Date();
     const pad = n => String(n).padStart(2, "0");
     const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
     const r = new Recorder({ onProgress: setRecState });
     try {
       await r.start({
-        suggestedName: `greenalyzer-${stamp}.ndjson`,
+        suggestedName: `greenalyzer-${stamp}${label ? "_" + label : ""}.ndjson`,
+        dir: recDirRef.current,
+        picker: !remote,
         header: {
           type: "session", t: Date.now(),
           app: "smpte-timecode-greenalyzer", version: __APP_VERSION__, commit: __GIT_COMMIT__,
           sampleRate: sampleRateRef.current ?? null,
           userAgent: navigator.userAgent,
+          label: label || null, startedBy: remote ? "remote" : "button",
         },
       });
     } catch (e) {
-      if (e?.name !== "AbortError") setRecState({ active: false, error: String(e?.message ?? e) });
+      if (e?.name !== "AbortError") {
+        r.error = String(e?.message ?? e);
+        lastRecorderRef.current = r;
+        setRecState({ active: false, error: r.error });
+        if (remote) throw e;
+      }
       return;
+    } finally {
+      recStartingRef.current = false;
     }
     recorderRef.current = r;
+    lastRecorderRef.current = r;
   }
 
   async function stopRecording() {
@@ -1584,6 +1616,64 @@ export default function SMPTEAnalyzer() {
     recorderRef.current = null;
     await r.stop([{ type: "log", t: Date.now(), entries: sessionLogTxRef.current }]);
   }
+
+  // Recordings folder: take back the one chosen last time, if the browser still
+  // allows it; otherwise the button offers to allow it again (one click).
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      const dir = await savedFolder();
+      if (!dir || !live) return;
+      const ok = (await folderPermission(dir)) === "granted";
+      if (!live) return;
+      savedDirRef.current = dir;
+      recDirRef.current = ok ? dir : null;
+      setRecDir({ name: dir.name, needsAllow: !ok });
+    })();
+    return () => { live = false; };
+  }, []);
+
+  async function chooseRecordingFolder() {
+    try {
+      const saved = savedDirRef.current;
+      let dir = null;
+      if (recDir.needsAllow && saved && await allowFolder(saved)) dir = saved;
+      else dir = await pickFolder();
+      savedDirRef.current = dir;
+      recDirRef.current = dir;
+      setRecDir({ name: dir.name, needsAllow: false });
+    } catch (e) {
+      if (e?.name !== "AbortError") setRecState(s => ({ ...s, error: String(e?.message ?? e) }));
+    }
+  }
+
+  // Remote control. The handlers ref is refreshed every render so commands
+  // always reach the current startRecording/stopRecording.
+  const remoteHandlersRef = useRef(null);
+  remoteHandlersRef.current = { start: startRecording, stop: stopRecording };
+  useEffect(() => {
+    try {
+      localStorage.setItem("greenalyzer.remote", remoteEnabled ? "1" : "0");
+      localStorage.setItem("greenalyzer.remoteUrl", remoteUrl);
+    } catch { /* not remembered; still works */ }
+    if (!remoteEnabled) return;
+    const rc = new RemoteControl({
+      url: remoteUrl,
+      onCommand: (c) => c.cmd === "start" ? remoteHandlersRef.current.start({ label: c.label, remote: true })
+        : c.cmd === "stop" ? remoteHandlersRef.current.stop() : Promise.resolve(),
+      getState: () => {
+        const r = lastRecorderRef.current;
+        return {
+          recording: !!recorderRef.current, file: r?.filename ?? null, mode: r?.mode ?? null,
+          folder: recDirRef.current?.name ?? null, lines: r?.lines ?? 0, bytes: r?.bytes ?? 0,
+          started: recorderRef.current?.startedAt ?? null, error: r?.error ?? null, version: __APP_VERSION__,
+        };
+      },
+      onStatus: setRemoteState,
+    });
+    rc.start();
+    return () => rc.stop();
+  }, [remoteEnabled, remoteUrl]);
 
   // Closing the tab mid-recording loses it (see recorder.js), so ask first.
   useEffect(() => {
@@ -3200,7 +3290,7 @@ export default function SMPTEAnalyzer() {
       <div style={{ marginTop:12, ...PANEL, padding:12, display:"flex", alignItems:"center", gap:12, flexWrap:"wrap" }}>
         <span style={{ fontSize:11, color:"#ff9900", letterSpacing:3 }}>RECORDER</span>
         {!recState.active ? (
-          <button onClick={startRecording} style={buttonStyle("#ff3b3b")}>● RECORD</button>
+          <button onClick={() => startRecording()} style={buttonStyle("#ff3b3b")}>● RECORD</button>
         ) : (
           <button onClick={stopRecording} style={buttonStyle("#00ff88")}>■ STOP &amp; SAVE</button>
         )}
@@ -3215,6 +3305,34 @@ export default function SMPTEAnalyzer() {
         {recState.error && (
           <div style={{ fontSize:11, fontFamily:"monospace", color:"#ff3b3b" }}>⚠ {recState.error}</div>
         )}
+        <div style={{ flexBasis:"100%", height:0 }} />
+        {canPickFolder() && (
+          <button onClick={chooseRecordingFolder} disabled={recState.active}
+            title="Recordings go here as new files, with no save dialog. Needed for disk recording from remote start."
+            style={{ ...buttonStyle(recDir.needsAllow ? "#ff9900" : "#3b9cff"), opacity: recState.active ? 0.5 : 1 }}>
+            {recDir.needsAllow ? `ALLOW FOLDER ${recDir.name}` : recDir.name ? `FOLDER: ${recDir.name}` : "CHOOSE FOLDER…"}
+          </button>
+        )}
+        <button onClick={() => setRemoteEnabled(v => !v)}
+          title="Start/stop recording from other devices, relayed by the OSC listener. See REMOTE_RECORD.md."
+          style={buttonStyle(remoteEnabled ? "#00ff88" : "#666")}>
+          {remoteEnabled ? "REMOTE: ON" : "REMOTE: OFF"}
+        </button>
+        <input
+          className="tc-input-wide"
+          type="text" value={remoteUrl} onChange={e => setRemoteUrl(e.target.value)}
+          disabled={remoteEnabled}
+          title="OSC listener address"
+          style={{ background:"#0a0a0a", border:"1px solid #222", color:"#00ff88",
+                   fontFamily:"monospace", fontSize:12, padding:"4px 8px",
+                   minWidth:180, flex:1, outline:"none", opacity: remoteEnabled ? 0.5 : 1 }}
+        />
+        <div style={{ fontSize:11, fontFamily:"monospace", letterSpacing:2,
+          color: !remoteEnabled ? "#444" : remoteState === "open" ? "#00ff88" : "#ff9900" }}>
+          {!remoteEnabled ? "○ REMOTE OFF"
+            : remoteState === "open" ? (recDirRef.current ? "● REMOTE READY" : "● REMOTE READY · NO FOLDER (IN MEMORY)")
+            : "◐ LOOKING FOR OSC LISTENER…"}
+        </div>
       </div>
 
       {/* SMPTE Spec Reference — bottom of page */}

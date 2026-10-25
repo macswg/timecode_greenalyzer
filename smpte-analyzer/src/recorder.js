@@ -6,11 +6,17 @@
 // continuity, carrier), one JSON object per line, each stamped with a
 // recorder-monotonic `seq`. Same wire schema as smpte-bridge/README.md.
 //
-// Two storage modes:
-//   "disk"   — Chromium (Chrome/Edge): the File System Access API lets the
-//              user pick a file up front and lines stream into it. NOTE: the
-//              browser writes to a swap file and only commits to the chosen
-//              path on close(), i.e. when recording stops.
+// Three storage modes:
+//   "folder" — Chromium: a recordings folder chosen once (pickFolder) gets a
+//              new file per recording, with no dialog. This is what lets a
+//              remote start (remoteControl.js) record to disk, since a save
+//              dialog needs a click.
+//   "disk"   — Chromium (Chrome/Edge), no folder chosen: the File System
+//              Access API lets the user pick a file up front and lines stream
+//              into it.
+//              NOTE (folder and disk): the browser writes to a swap file and
+//              only commits to the chosen path on close(), i.e. when
+//              recording stops.
 //   "memory" — everywhere else (Safari/Firefox, or picker unavailable):
 //              lines accumulate in memory and download as a file on stop.
 // In both modes, closing the tab before stopping loses the recording — the
@@ -38,11 +44,17 @@ export class Recorder {
     this.error = null;
   }
 
-  // Must be called from a user gesture (button click) — the save picker
-  // requires one. Throws AbortError if the user cancels the picker.
-  async start({ suggestedName, header } = {}) {
+  // With `dir` (a folder from pickFolder), writes a new file there. Otherwise
+  // shows the save picker, which must be called from a user gesture (button
+  // click); `picker: false` skips it and records in memory. Throws AbortError
+  // if the user cancels the picker.
+  async start({ suggestedName, header, dir = null, picker = true } = {}) {
     this.filename = suggestedName;
-    if (typeof window !== "undefined" && typeof window.showSaveFilePicker === "function") {
+    if (dir) {
+      const handle = await dir.getFileHandle(suggestedName, { create: true });
+      this._writable = await handle.createWritable();
+      this.mode = "folder";
+    } else if (picker && typeof window !== "undefined" && typeof window.showSaveFilePicker === "function") {
       try {
         const handle = await window.showSaveFilePicker({
           suggestedName,
@@ -76,7 +88,7 @@ export class Recorder {
     if (!this._pending.length) { this._report(); return this._chain; }
     const batch = this._pending.join("");
     this._pending = [];
-    if (this.mode === "disk") {
+    if (this._writable) {
       this._chain = this._chain
         .then(() => this._writable.write(batch))
         .catch(e => { this.error = String(e?.message ?? e); });
@@ -101,7 +113,7 @@ export class Recorder {
     clearInterval(this._timer);
     for (const m of trailer) this.write(m);
     await this._flush();
-    if (this.mode === "disk") {
+    if (this._writable) {
       await this._chain;
       try { await this._writable.close(); } catch (e) { this.error = String(e?.message ?? e); }
     } else {
@@ -116,4 +128,46 @@ export class Recorder {
     this.startedAt = null;
     this._report();
   }
+}
+
+// Recordings folder (Chromium only). The handle is kept in IndexedDB so it
+// survives a reload; after one, the browser may want a click to allow it
+// again (folderPermission() === "prompt" → allowFolder() from a button).
+const DB = "greenalyzer-recorder", STORE = "kv", KEY = "folder";
+
+function idb(mode, fn) {
+  return new Promise((resolve, reject) => {
+    const open = indexedDB.open(DB, 1);
+    open.onupgradeneeded = () => open.result.createObjectStore(STORE);
+    open.onerror = () => reject(open.error);
+    open.onsuccess = () => {
+      const tx = open.result.transaction(STORE, mode);
+      const req = fn(tx.objectStore(STORE));
+      tx.oncomplete = () => { open.result.close(); resolve(req.result); };
+      tx.onerror = () => { open.result.close(); reject(tx.error); };
+    };
+  });
+}
+
+export const canPickFolder = () => typeof window !== "undefined" && typeof window.showDirectoryPicker === "function";
+
+// From a click. Throws AbortError if the user cancels.
+export async function pickFolder() {
+  const dir = await window.showDirectoryPicker({ id: "greenalyzer-recordings", mode: "readwrite" });
+  try { await idb("readwrite", s => s.put(dir, KEY)); } catch { /* still usable this session */ }
+  return dir;
+}
+
+export async function savedFolder() {
+  if (!canPickFolder()) return null;
+  try { return (await idb("readonly", s => s.get(KEY))) ?? null; } catch { return null; }
+}
+
+export async function folderPermission(dir) {
+  try { return await dir.queryPermission({ mode: "readwrite" }); } catch { return "denied"; }
+}
+
+// From a click: asks the browser to allow the saved folder again.
+export async function allowFolder(dir) {
+  return (await dir.requestPermission({ mode: "readwrite" })) === "granted";
 }
