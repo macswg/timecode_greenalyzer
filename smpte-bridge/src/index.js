@@ -7,9 +7,9 @@
 import http from "node:http";
 import https from "node:https";
 import { readFile } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { readFileSync, createWriteStream, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join, normalize, extname } from "node:path";
+import { dirname, join, normalize, extname, resolve } from "node:path";
 import { WebSocketServer } from "ws";
 
 const PORT = Number(process.env.PORT || 8765);
@@ -49,6 +49,36 @@ function loadTlsConfig() {
 }
 
 const tls = loadTlsConfig();
+
+// Optional recording. RECORD_FILE=<path> appends every message the publisher
+// sends (tc, error, continuity, carrier, log) to that file as NDJSON — one
+// JSON object per line, exactly as received. Append mode, so restarts extend
+// the same file. A literal "{date}" in the path expands to the start date
+// (YYYY-MM-DD) for one-file-per-day capture. Unset = no recording.
+// RECORD_TYPES=tc,error,... limits which message types are written.
+function openRecorder() {
+  const raw = process.env.RECORD_FILE;
+  if (!raw) return null;
+  const path = resolve(raw.replace("{date}", new Date().toISOString().slice(0, 10)));
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    const stream = createWriteStream(path, { flags: "a" });
+    // Fail loud: a recording that silently stops is worse than none.
+    stream.on("error", (e) => { console.error(`[record] write failed (${e.message}). Exiting.`); process.exit(1); });
+    const types = parseTypes(process.env.RECORD_TYPES);
+    return { path, stream, types, lines: 0 };
+  } catch (e) {
+    console.error(`[record] cannot open ${path} (${e.message}). Refusing to start.`);
+    process.exit(1);
+  }
+}
+
+function parseTypes(str) {
+  const list = (str || "").split(",").map(s => s.trim()).filter(Boolean);
+  return list.length ? new Set(list) : null;   // null = all types
+}
+
+const recorder = openRecorder();
 const SCHEME = tls ? "https" : "http";
 const WS_SCHEME = tls ? "wss" : "ws";
 
@@ -71,6 +101,9 @@ let lastTc = null;
 // connects mid-session is handed the full log immediately (see /subscribe
 // hello). Live updates arrive via generic fan-out like every other message.
 let lastLog = null;
+// Server-Sent Events clients on /events: { res, types } where types is a Set
+// of message types to forward, or null for all.
+const sseClients = new Set();
 // framesOut: count of tc messages forwarded (per ingest message, not per
 // subscriber). fanoutSends: total ws.send() calls across all subscribers
 // (framesOut × current subscriber count, roughly), useful for diagnosing
@@ -98,6 +131,8 @@ async function serveStatic(req, res) {
 }
 
 async function handleRequest(req, res) {
+  const [urlPath, query = ""] = req.url.split("?");
+  if (urlPath === "/events") { handleSse(req, res, new URLSearchParams(query)); return; }
   if (req.url === "/status") {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({
@@ -105,11 +140,39 @@ async function handleRequest(req, res) {
       subscribers: subscribers.size,
       lastTc, stats,
       uptimeMs: Date.now() - stats.startedAt,
+      sseClients: sseClients.size,
+      recording: recorder ? { file: recorder.path, lines: recorder.lines } : null,
     }, null, 2));
     return;
   }
   if (await serveStatic(req, res)) return;
   res.writeHead(404); res.end();
+}
+
+// curl-friendly live stream: `curl -N http://localhost:8765/events`.
+// Standard text/event-stream (also works with browser EventSource). Each
+// message is `event: <type>` + `data: <json>`. ?types=error,continuity
+// filters — handy since tc arrives at ~30 Hz. A hello event carrying lastTc /
+// lastLog is sent on connect, and a comment heartbeat every 15 s keeps
+// proxies from timing the connection out.
+function handleSse(req, res, params) {
+  res.writeHead(200, {
+    "content-type": "text/event-stream; charset=utf-8",
+    "cache-control": "no-cache",
+    "connection": "keep-alive",
+    "access-control-allow-origin": "*",
+    "x-accel-buffering": "no",
+  });
+  const client = { res, types: parseTypes(params.get("types")) };
+  sseClients.add(client);
+  console.log(`[sse] +1 from ${req.socket.remoteAddress} (total ${sseClients.size})`);
+  res.write(`event: hello\ndata: ${JSON.stringify({ type: "hello", t: Date.now(), lastTc, lastLog })}\n\n`);
+  const heartbeat = setInterval(() => res.write(": ping\n\n"), 15000);
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    sseClients.delete(client);
+    console.log(`[sse] -1 (total ${sseClients.size})`);
+  });
 }
 
 const wssIngest = new WebSocketServer({ noServer: true });
@@ -159,6 +222,16 @@ wssIngest.on("connection", (ws, req) => {
     for (const s of subscribers) {
       if (s.readyState === 1) { s.send(payload); stats.fanoutSends++; }
     }
+    if (sseClients.size) {
+      const frame = `event: ${msg.type}\ndata: ${payload}\n\n`;
+      for (const c of sseClients) {
+        if (!c.types || c.types.has(msg.type)) c.res.write(frame);
+      }
+    }
+    if (recorder && (!recorder.types || recorder.types.has(msg.type))) {
+      recorder.stream.write(payload + "\n");
+      recorder.lines++;
+    }
   });
 
   ws.on("close", () => {
@@ -192,4 +265,12 @@ if (tls) console.log("[bridge] TLS enabled — connect with wss:// (plain ws:// 
 console.log(`  publish   →  ${WS_SCHEME}://<host>:${PORT}/ingest`);
 console.log(`  subscribe →  ${WS_SCHEME}://<host>:${PORT}/subscribe`);
 console.log(`  status    →  ${SCHEME}://<host>:${PORT}/status`);
+console.log(`  events    →  curl -N ${SCHEME}://<host>:${PORT}/events[?types=tc,error]`);
+if (recorder) {
+  console.log(`  recording →  ${recorder.path}${recorder.types ? ` (types: ${[...recorder.types].join(",")})` : ""}`);
+  // Flush buffered lines on shutdown (Ctrl-C, docker stop).
+  for (const sig of ["SIGINT", "SIGTERM"]) {
+    process.on(sig, () => recorder.stream.end(() => process.exit(0)));
+  }
+}
 console.log(`  viewer    →  ${SCHEME}://<host>:${PORT}/`);

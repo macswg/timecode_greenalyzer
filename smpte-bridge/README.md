@@ -100,7 +100,57 @@ volumes:
   JSON feed verbatim.
 - `http://localhost:8765/status` — JSON snapshot (publisher state, subscriber
   count, frame counters, last timecode).
+- `http://localhost:8765/events` — the same feed as Server-Sent Events, for
+  `curl` / scripts / browser `EventSource` (see below).
 - `http://localhost:8765/` — phone-friendly live viewer (see below).
+
+## curl event stream (`/events`)
+
+```
+curl -N http://localhost:8765/events                         # everything
+curl -N "http://localhost:8765/events?types=error,continuity" # just problems
+```
+
+Standard `text/event-stream`: each message arrives as `event: <type>` +
+`data: <json>` + a blank line. `?types=` takes a comma list of message types
+(`tc`, `error`, `continuity`, `carrier`, `log`); omit it for all. `tc` arrives
+at ~30 Hz, so filter it out when you only want events. A `hello` event (with
+`lastTc` / `lastLog`) is sent on connect, and a `: ping` comment every 15 s keeps
+idle connections alive. `-N` disables curl's buffering. To get bare JSON lines:
+
+```
+curl -sN http://localhost:8765/events | sed -n 's/^data: //p' | jq -c .
+```
+
+## Recording to a file (`RECORD_FILE`)
+
+Set `RECORD_FILE` and the bridge appends **every message the analyzer
+publishes** to that file as NDJSON (one JSON object per line, exactly as
+received — same schema as the message types below). Unset = no recording.
+
+```
+RECORD_FILE=recordings/tc-{date}.ndjson npm start
+# or without tailscale:
+RECORD_FILE=recordings/show.ndjson node src/index.js
+```
+
+- `{date}` in the path expands to the bridge's start date (`YYYY-MM-DD`).
+- Missing directories are created. The file is opened in **append** mode, so a
+  restart continues the same file rather than overwriting it.
+- `RECORD_TYPES=error,continuity,carrier` limits what's written. At ~30 Hz,
+  `tc` messages add up to roughly 100+ MB per hour. Leave it out
+  for a lightweight incident log, or keep it for a frame-accurate audit trail.
+- The startup banner prints the active file, and `/status` reports
+  `recording: {file, lines}`. If the file can't be opened or written, the bridge
+  exits with an error rather than silently not recording.
+- Only data that reaches the bridge is recorded: the analyzer must be
+  **▶ PUBLISHING**.
+
+With Docker, uncomment `RECORD_FILE` and the `volumes:` mount in
+`docker-compose.yml` so the file lands in `smpte-bridge/recordings/` on the host.
+
+Analyze afterwards with `jq`, e.g. every continuity break:
+`jq -c 'select(.type=="continuity")' recordings/show.ndjson`.
 
 ## Phone viewer
 

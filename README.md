@@ -377,7 +377,7 @@ The **RECORDER** panel, below the API publisher, saves that same message stream 
 2. Run your show or test. The panel shows elapsed time, line count, and size.
 3. Click **■ STOP & SAVE**. Chrome/Edge commit the file to the path you chose; Safari/Firefox download it.
 
-The file starts with a `{type:"session"}` header (app version, commit, sample rate, user agent), contains every `tc` / `error` / `continuity` / `carrier` message stamped with its own `seq`, and ends with one `{type:"log"}` snapshot of the full session log (including notes). Expect roughly 100+ MB per hour, since `tc` runs at ~30 Hz.
+The file starts with a `{type:"session"}` header (app version, commit, sample rate, user agent), contains every `tc` / `error` / `continuity` / `carrier` message stamped with its own `seq`, and ends with one `{type:"log"}` snapshot of the full session log (including notes). The format matches what the bridge's `RECORD_FILE` option writes. Expect roughly 100+ MB per hour, since `tc` runs at ~30 Hz.
 
 > **Stop before closing the tab.** The browser only finalises the file on STOP, so closing or reloading mid-recording loses it. The page asks for confirmation if you try.
 

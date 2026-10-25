@@ -8,4 +8,9 @@ services:
       # Bind all interfaces inside the container so the mapped port is reachable.
       HOSTS: "0.0.0.0"
       # PORT: "8765"   # uncomment to override the default
+      # Record every message to NDJSON on the host (./recordings/):
+      # RECORD_FILE: "/recordings/tc-{date}.ndjson"
+      # RECORD_TYPES: "tc,error,continuity,carrier"   # optional filter
+    # volumes:
+    #   - ./recordings:/recordings
     restart: unless-stopped
