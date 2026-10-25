@@ -17,11 +17,15 @@ export class RemoteControl {
   // onCommand({id, cmd: "start"|"stop", label}) → Promise; a throw is reported back as ackError.
   // getState() → {recording, file, mode, folder, lines, bytes, started, error}.
   // onStatus("connecting" | "open" | "closed").
-  constructor({ url, onCommand, getState, onStatus }) {
+  // onTdRec({rec, recording, files, rec_started}) — the TouchDesigner
+  // recorder's REC state (rec_started in Unix seconds), from listener ≥ 1.9.0:
+  // on each command (before onCommand) and each state reply.
+  constructor({ url, onCommand, getState, onStatus, onTdRec }) {
     this.base = url.replace(/\/+$/, "");
     this.onCommand = onCommand;
     this.getState = getState;
     this.onStatus = onStatus;
+    this.onTdRec = onTdRec;
     this._es = null;
     this._beat = null;
     this._retry = null;
@@ -51,6 +55,7 @@ export class RemoteControl {
     es.addEventListener("command", async (e) => {
       let cmd;
       try { cmd = JSON.parse(e.data); } catch { return; }
+      if (cmd.td_rec) this.onTdRec?.(cmd.td_rec);
       let ackError = null;
       try { await this.onCommand(cmd); } catch (err) { ackError = String(err?.message ?? err); }
       this._post({ ack: cmd.id, ackError });
@@ -72,6 +77,9 @@ export class RemoteControl {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...this.getState(), ...extra }),
-    }).catch(() => { /* the event stream's onerror reports the outage */ });
+    })
+      .then(r => r.ok ? r.json() : null)
+      .then(j => { if (j?.td_rec) this.onTdRec?.(j.td_rec); })
+      .catch(() => { /* the event stream's onerror reports the outage */ });
   }
 }

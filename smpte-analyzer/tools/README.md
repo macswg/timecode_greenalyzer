@@ -55,3 +55,13 @@ node --import ./tools/register-loader.mjs tools/verify-hh.mjs
 
 Both are generated artifacts (large — the half-hour series is ~2.4 GB) and are
 not meant to be committed.
+
+## Latency calibration
+
+`latency-cal.py` (Python 3, standard library only) measures the RECORDER panel's
+**LATENCY CAL** from a Greenalyzer recording and an OSC listener recording made at
+the same time. See "Calibrating `frameT`" in `../../REMOTE_RECORD.md`.
+
+```bash
+python3 tools/latency-cal.py greenalyzer-….ndjson osc_….jsonl --addr /greenalyzer/cal --tc 01:00:00:00
+```

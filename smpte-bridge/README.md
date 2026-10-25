@@ -130,6 +130,14 @@ orange rate label; non-drop with `:` and blue, matching the analyzer.
   cadenceDropFrame, carrierCadenceMismatch, fieldMarkBehavior, bgf, userBits, source,
   ltcLocked, frameValid, levelDbFS, peakDbFS, driftPpm, dropoutPct, snr, errors}`
   emitted every tick (~30 Hz). `seq` is a publisher-monotonic counter starting at 1.
+  `t` is when the tick sent it (epoch ms). `frameT` is when the frame shown began
+  arriving — bit 0 of its codeword, the instant `hh:mm:ss:ff` labels — in epoch ms
+  (0.1 ms resolution, corrected by `latencyMs`); use it, not `t`, to line
+  timecode up with other recordings on the same Mac's clock. `null` when no fresh
+  frame. `recT` is seconds into the TouchDesigner recorder's current take (the
+  marker files' `time` axis), from `frameT` (or `t`); `null` when no take is known.
+  `latencyMs` is the total already subtracted from `frameT`: the measured browser
+  render lead plus the LATENCY CAL setting (see `REMOTE_RECORD.md`).
   `rate` is the combined SMPTE rate key (e.g. `"29.97df"`); `dropFrame` is boolean.
   `carrierRate` / `cadenceFps` / `cadenceDropFrame` are the independent carrier-rate
   and counting-cadence observations (combined into `rate` for convenience).
@@ -147,6 +155,11 @@ orange rate label; non-drop with `:` and blue, matching the analyzer.
   dropFrameKnown, framesSeen, dfFlagMatches}`, `framesDecoded`, `bitErrors`
   (lifetime decoder counters), `continuityBreaks60s`, `lastBreak` `{breakType,
   delta, from, to, ageMs}`, `sampleRate` (AudioContext Hz).
+- `{"type":"rec", t, seq, zone, rec, recording, files, recStarted}` emitted when the
+  TouchDesigner recorder's REC state changes, as relayed by the OSC listener (≥ 1.9.0,
+  REMOTE on). `recStarted` is the take's REC start in epoch ms (marker `time` 0);
+  `zone` is this Mac's UTC offset in minutes east. A state not heard for 5 s reads
+  `rec: false`.
 - `{"type":"carrier", t, seq, eventType, tc, fps, fractional, ...}` emitted on
   carrier-classifier edges. `eventType` is `"MEASURING_COMMIT"`, `"RATE_CHANGE"`
   (also carries `measuredFps, sigmaFps, windowFrames, windowSeconds,

@@ -173,7 +173,50 @@ op('oscout1').sendOSC('/greenalyzer/record/stop', [])
 
 The same file as clicking **● RECORD**: NDJSON, one JSON object per line. A `session` header
 (now with `label` and `startedBy: "remote"`), then every `tc` (about 30 a second), `error`,
-`continuity` and `carrier` message, then one final `log` snapshot. The message fields are in
+`continuity`, `carrier` and `rec` message, then one final `log` snapshot.
+
+### Lining it up with other recordings
+
+Every line's `t` is UTC, ms since 1970, from this Mac's clock: the same clock as the OSC
+listener's `t` (seconds). For timecode, use each `tc` line's `frameT` instead: when that frame
+actually arrived, not when the 30 Hz tick happened to send it.
+
+- The `session` header has `started` (local time with UTC offset), `zone` (minutes east of
+  UTC) and `tdRec`, the TouchDesigner recorder's take at that moment.
+- With OSC listener 1.9.0 or later and REMOTE on, the page also follows the TouchDesigner
+  recorder's REC state. Each `tc` line then has `recT`, seconds into the take on the same axis as
+  the marker files' `time` column, and every change of take is written as a `rec` message.
+
+### Calibrating `frameT`
+
+`frameT` is corrected for two delays, and each `tc` line says how much was taken off in total as
+`latencyMs`:
+
+- **Render lead**, measured automatically: how far the browser's audio runs ahead of the output
+  device (shown as **RENDER LEAD** in the RECORDER panel).
+- **LATENCY CAL**, set by hand in the RECORDER panel: everything else, mainly the audio
+  interface's input latency. It's remembered per browser and written into each recording's
+  `session` header. Measure it once per setup (interface, buffer size), and again after changing
+  either.
+
+To measure it, something that reads the same LTC has to send an OSC message to the listener at a
+known frame. For example, a grandMA3 timecode show with a cue at `01:00:00:00` that sends
+`/greenalyzer/cal`.
+
+1. Run the OSC listener and record on both it and the Greenalyzer.
+2. Roll the LTC through that frame a few times (5–10 is plenty), then stop both recordings.
+3. Run:
+
+   ```sh
+   python3 smpte-analyzer/tools/latency-cal.py greenalyzer-….ndjson osc_….jsonl \
+     --addr /greenalyzer/cal --tc 01:00:00:00
+   ```
+
+4. Enter the **Set LATENCY CAL to** value it prints. The spread between events should be a few
+   ms; much more means something in the chain varies.
+
+The result includes the sender's own reaction time to the LTC. That's what's wanted for placing
+that sender's OSC against the timecode, but it isn't a pure measure of the Greenalyzer. The message fields are in
 `smpte-bridge/README.md`. Expect about 100+ MB per hour.
 
 **The file is only complete after stop.** Chrome writes to a temporary file and moves it into the

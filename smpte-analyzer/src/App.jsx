@@ -254,6 +254,24 @@ function generateSimulatedAnalysis(rateKey, levelDbFS, noiseLevel, dropoutProb) 
 // ─── Formatting helpers ──────────────────────────────────────────────────────
 const padTc = (n) => String(n ?? 0).padStart(2, "0");
 // HH:MM:SS:FF / HH:MM:SS;FF formatting comes from ltcDecoder's tcString().
+// This Mac's UTC offset at `d`, in minutes east of UTC (-420 for PDT) — the
+// same `zone` convention as the OSC listener's recordings.
+const utcOffsetMinutes = (d = new Date()) => -d.getTimezoneOffset();
+// Local time with milliseconds and UTC offset, e.g. 2026-10-22T20:45:18.067-07:00.
+function isoLocal(d = new Date()) {
+  const p = (n, w = 2) => String(Math.abs(n)).padStart(w, "0");
+  const z = utcOffsetMinutes(d);
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`
+    + `${z < 0 ? "-" : "+"}${p(Math.trunc(z / 60))}:${p(z % 60)}`;
+}
+// The TouchDesigner recorder's take from tdRecRef's last report; like the OSC
+// listener, a report older than 5 s counts as not recording.
+function currentTdRec(s) {
+  if (s && s.rec && performance.now() - s.at <= 5000) {
+    return { rec: true, recording: s.recording, files: s.files, recStarted: s.recStarted };
+  }
+  return { rec: false, recording: null, files: [], recStarted: null };
+}
 
 // ─── Shared style tokens ─────────────────────────────────────────────────────
 const PANEL = { border: "1px solid #1a1a1a", borderRadius: 3, background: "#080808" };
@@ -722,6 +740,20 @@ export default function SMPTEAnalyzer() {
   // performance.now() at which the offset was last re-sampled (throttles the
   // getOutputTimestamp re-measure to once per OFFSET_RESAMPLE_MS).
   const audioClockOffsetSampledAtRef = useRef(0);
+  // How far Web Audio renders ahead of what the output device is playing
+  // (ctx.currentTime − getOutputTimestamp().contextTime), EMA'd with the
+  // offset above. Chunk stamps mapped through that offset land at the time
+  // the block would *play*, so this much later than when it was processed;
+  // frameT subtracts it. Null when getOutputTimestamp is unavailable (then
+  // the offset is receipt-anchored and has no such lead).
+  const renderLeadMsRef = useRef(null);
+  // Fixed per-setup correction (ms) for what renderLead can't see — mainly
+  // the interface's input latency. Measured once, see REMOTE_RECORD.md.
+  const [latencyCalMs, setLatencyCalMs] = useState(() => {
+    try { const v = parseFloat(localStorage.getItem("greenalyzer.latencyCalMs")); return Number.isFinite(v) ? v : 0; } catch { return 0; }
+  });
+  const latencyCalMsRef = useRef(latencyCalMs);
+  latencyCalMsRef.current = latencyCalMs;
   const analyserRef = useRef(null);
   const sourceRef = useRef(null);
   const rafRef = useRef(null);
@@ -833,6 +865,12 @@ export default function SMPTEAnalyzer() {
     try { return localStorage.getItem("greenalyzer.remoteUrl") || "http://127.0.0.1:8415"; } catch { return "http://127.0.0.1:8415"; }
   });
   const [remoteState, setRemoteState] = useState("closed");
+  // TouchDesigner recorder's REC state, as the OSC listener last reported it
+  // (td_rec on each command and heartbeat reply): {rec, recording, files,
+  // recStarted (epoch ms), at (performance.now() received)}. Like the
+  // listener, a state not heard for 5 s counts as not recording.
+  const tdRecRef = useRef(null);
+  const tdRecKeyRef = useRef(null);
   const [liveStatusCollapsed, setLiveStatusCollapsed] = useState(false);
   const [sessionLogCollapsed, setSessionLogCollapsed] = useState(false);
   const [measuredSampleRate, setMeasuredSampleRate] = useState(null);
@@ -1048,6 +1086,7 @@ export default function SMPTEAnalyzer() {
         data.bgf = [lf.bgf0, lf.bgf1, lf.bgf2];
         data.userBits = lf.userBits ?? null;
         data.frameValid = fresh;
+        data.frameEndPerfT = lf.t;
       } else {
         data.hh = 0; data.mm = 0; data.ss = 0; data.ff = 0;
         data.dropFrame = false;
@@ -1376,11 +1415,42 @@ export default function SMPTEAnalyzer() {
       });
     }
 
+    // TouchDesigner recorder's REC state (relayed by the OSC listener, see
+    // tdRecRef). Emitted as a `rec` message on every change, so a recording
+    // says which take each stretch of timecode belongs to.
+    const td = currentTdRec(tdRecRef.current);
+    const tdKey = `${td.rec}|${td.recording}|${td.recStarted}`;
+    if (tdKey !== tdRecKeyRef.current) {
+      tdRecKeyRef.current = tdKey;
+      emitApi({ type: "rec", t: Date.now(), zone: utcOffsetMinutes(), ...td });
+    }
+
     if (publisherRef.current || recorderRef.current) {
       const rnd = (v, d) => Number.isFinite(v) ? +v.toFixed(d) : null;
       const obs = data.carrierObs;
+      const tNow = Date.now();
+      // frameT: epoch ms at which the shown frame's codeword began (bit 0) —
+      // the instant SMPTE says hh:mm:ss:ff labels. lf.t is when its last bit
+      // (end of sync word) arrived, so step back one frame period. Measured
+      // as an age against the current Date.now() rather than via
+      // performance.timeOrigin, which drifts from the wall clock over hours.
+      // latencyMs takes off the render lead (see renderLeadMsRef) and the
+      // per-setup calibration for the interface's input latency.
+      let frameT = null;
+      const latencyMs = (renderLeadMsRef.current ?? 0) + latencyCalMsRef.current;
+      if (useRealAudio && data.frameValid && data.frameEndPerfT != null) {
+        const nomFps = obs?.nominalFps ?? decoderRef.current?.nominalFps;
+        const fps = nomFps ? (obs?.fractional ? nomFps / 1.001 : nomFps) : null;
+        if (fps) frameT = +(tNow - (performance.now() - data.frameEndPerfT) - 1000 / fps - latencyMs).toFixed(1);
+      }
+      // recT: seconds into the TD take, the timeline of its marker files'
+      // `time` column (same rule as the listener's rec_t).
+      const recRef = frameT ?? tNow;
+      const recT = td.rec && td.recStarted != null && recRef >= td.recStarted
+        ? +((recRef - td.recStarted) / 1000).toFixed(3) : null;
       emitApi({
-        type: "tc", t: Date.now(),
+        type: "tc", t: tNow, frameT, recT,
+        latencyMs: frameT != null ? +latencyMs.toFixed(1) : null,
         hh: data.hh, mm: data.mm, ss: data.ss, ff: data.ff,
         rate: rateKey, dropFrame: data.dropFrame,
         // Carrier rate and counting cadence are independent observations.
@@ -1588,7 +1658,18 @@ export default function SMPTEAnalyzer() {
         dir: recDirRef.current,
         picker: !remote,
         header: {
-          type: "session", t: Date.now(),
+          type: "session", t: d.getTime(),
+          // Local start time with UTC offset, and the offset alone (minutes
+          // east of UTC) — every line's `t` is UTC epoch ms; these are only
+          // for showing it as local time without guessing the zone.
+          started: isoLocal(d), zone: utcOffsetMinutes(d),
+          // The TD take running when this recording started; later changes
+          // come as `rec` messages.
+          tdRec: currentTdRec(tdRecRef.current),
+          // frameT corrections in force at start (each tc line has the total
+          // as latencyMs; the render lead part follows the device).
+          latencyCalMs: latencyCalMsRef.current,
+          renderLeadMs: renderLeadMsRef.current != null ? +renderLeadMsRef.current.toFixed(1) : null,
           app: "smpte-timecode-greenalyzer", version: __APP_VERSION__, commit: __GIT_COMMIT__,
           sampleRate: sampleRateRef.current ?? null,
           userAgent: navigator.userAgent,
@@ -1670,6 +1751,14 @@ export default function SMPTEAnalyzer() {
         };
       },
       onStatus: setRemoteState,
+      onTdRec: (td) => {
+        tdRecRef.current = {
+          rec: !!td?.rec, recording: td?.recording ?? null,
+          files: Array.isArray(td?.files) ? td.files : [],
+          recStarted: Number.isFinite(td?.rec_started) ? Math.round(td.rec_started * 1000) : null,
+          at: performance.now(),
+        };
+      },
     });
     rc.start();
     return () => rc.stop();
@@ -1859,6 +1948,7 @@ export default function SMPTEAnalyzer() {
     // suspended).
     audioClockOffsetMsRef.current = null;
     audioClockOffsetSampledAtRef.current = 0;
+    renderLeadMsRef.current = null;
     worklet.port.onmessage = (e) => {
       const msg = e.data;
       if (msg.type === "glitch") {
@@ -1890,12 +1980,21 @@ export default function SMPTEAnalyzer() {
       if (audioClockOffsetMsRef.current == null ||
           tNow - audioClockOffsetSampledAtRef.current >= OFFSET_RESAMPLE_MS) {
         let measured = null;
+        let lead = null;
         try {
           const ots = ctx.getOutputTimestamp();
           if (ots && Number.isFinite(ots.contextTime) && Number.isFinite(ots.performanceTime)) {
             measured = ots.performanceTime - ots.contextTime * 1000;
+            lead = (ctx.currentTime - ots.contextTime) * 1000;
           }
         } catch { /* getOutputTimestamp unavailable — fall through */ }
+        if (lead != null && lead >= 0 && lead < 500) {
+          renderLeadMsRef.current = renderLeadMsRef.current == null
+            ? lead
+            : renderLeadMsRef.current + OFFSET_EMA_ALPHA * (lead - renderLeadMsRef.current);
+        } else if (measured == null) {
+          renderLeadMsRef.current = null;
+        }
         // Fallback only when getOutputTimestamp gives nothing: anchor to
         // receipt time. Jittery, but EMA-smoothed across samples it beats a
         // single frozen value.
@@ -3332,6 +3431,28 @@ export default function SMPTEAnalyzer() {
           {!remoteEnabled ? "○ REMOTE OFF"
             : remoteState === "open" ? (recDirRef.current ? "● REMOTE READY" : "● REMOTE READY · NO FOLDER (IN MEMORY)")
             : "◐ LOOKING FOR OSC LISTENER…"}
+        </div>
+        <div style={{ flexBasis:"100%", height:0 }} />
+        <label title="Fixed correction subtracted from each frame's time (frameT), for the audio interface's input latency. Measure it once per setup: see REMOTE_RECORD.md."
+          style={{ fontSize:11, fontFamily:"monospace", letterSpacing:2, color:"#888", display:"flex", alignItems:"center", gap:8 }}>
+          LATENCY CAL
+          <input
+            type="number" step="0.1" defaultValue={latencyCalMs}
+            onChange={e => {
+              // Uncontrolled, so a half-typed "-" or "" isn't snapped to 0.
+              const v = parseFloat(e.target.value);
+              const ms = Number.isFinite(v) ? v : 0;
+              setLatencyCalMs(ms);
+              try { localStorage.setItem("greenalyzer.latencyCalMs", String(ms)); } catch { /* not remembered */ }
+            }}
+            style={{ background:"#0a0a0a", border:"1px solid #222", color:"#00ff88",
+                     fontFamily:"monospace", fontSize:12, padding:"4px 8px", width:80, outline:"none" }}
+          />
+          MS
+        </label>
+        <div title="How far the browser's audio runs ahead of the output device; subtracted from frameT automatically."
+          style={{ fontSize:11, fontFamily:"monospace", letterSpacing:2, color:"#444" }}>
+          RENDER LEAD {renderLeadMsRef.current != null ? `${renderLeadMsRef.current.toFixed(1)} MS` : "—"}
         </div>
       </div>
 
